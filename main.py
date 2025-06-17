@@ -37,9 +37,9 @@ if not GOOGLE_API_KEY:
 genai.configure(api_key=GOOGLE_API_KEY)
 
 # Configure the Gemini model. We pass the system prompt during initialization.
-# gemini-1.5-flash-latest is a fast and capable model suitable for this use case.
+# gemini-2.5-flash-latest is a fast and capable model suitable for this use case.
 model = genai.GenerativeModel(
-    model_name='gemini-1.5-flash-latest',
+    model_name='gemini-2.5-flash-latest',
     system_instruction=SYSTEM_PROMPT
 )
 
