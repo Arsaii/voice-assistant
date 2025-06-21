@@ -39,7 +39,7 @@ genai.configure(api_key=GOOGLE_API_KEY)
 # Configure the Gemini model. We pass the system prompt during initialization.
 # gemini-2.5-flash-latest is a fast and capable model suitable for this use case.
 model = genai.GenerativeModel(
-    model_name='gemini-2.5-flash-latest',
+    model_name='gemini-2.5-flash',
     system_instruction=SYSTEM_PROMPT
 )
 
@@ -62,9 +62,9 @@ async def twiml_endpoint():
     # You can change 'ElevenLabs' to 'Amazon' or 'Google' if you prefer their TTS.
     xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
-      <Connect>
-        <ConversationRelay url="{WS_URL}" welcomeGreeting="{WELCOME_GREETING}" ttsProvider="ElevenLabs" voice="FGY2WhTYpPnrIDTdsKH5" />
-      </Connect>
+    <Connect>
+    <ConversationRelay url="{WS_URL}" welcomeGreeting="{WELCOME_GREETING}" ttsProvider="ElevenLabs" voice="FGY2WhTYpPnrIDTdsKH5" />
+    </Connect>
     </Response>"""
     
     return Response(content=xml_response, media_type="text/xml")
