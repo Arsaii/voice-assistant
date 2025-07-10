@@ -19,7 +19,7 @@ if os.getenv("RAILWAY_STATIC_URL"):
     DOMAIN = os.getenv("RAILWAY_STATIC_URL").replace("https://", "")
 
 if not DOMAIN:
-    raise ValueError("No RAILWAY_STATIC_URL or NGROK_URL environment variable set.")
+    raise ValueError("No RAILWAY_STATIC_URL environment variable set.")
 
 WS_URL = f"wss://{DOMAIN}/ws"
 
