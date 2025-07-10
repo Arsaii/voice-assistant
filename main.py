@@ -2,7 +2,7 @@ import os
 import json
 import uvicorn
 import asyncio
-import time                                   # ← neu
+import time
 import google.generativeai as genai
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
@@ -14,16 +14,23 @@ load_dotenv()
 # --- Configuration ---
 PORT = int(os.getenv("PORT", "8080"))
 
-# Dynamische Domain-Erkennung
+# Robust domain detection: Railway, ngrok or localhost fallback
 DOMAIN = os.getenv("RAILWAY_STATIC_URL") or os.getenv("NGROK_URL")
 if not DOMAIN:
     DOMAIN = f"localhost:{PORT}"
 if DOMAIN.startswith("https://"):
     DOMAIN = DOMAIN.replace("https://", "")
 
-WS_URL = f"wss://{DOMAIN}/ws" if "localhost" not in DOMAIN else f"ws://{DOMAIN}/ws"
+WS_URL = (
+    f"wss://{DOMAIN}/ws"
+    if "localhost" not in DOMAIN
+    else f"ws://{DOMAIN}/ws"
+)
 
-WELCOME_GREETING = "Hi! I am a voice assistant powered by Twilio and Google Gemini. Ask me anything!"
+WELCOME_GREETING = (
+    "Hi! I am a voice assistant powered by Twilio and Google Gemini. "
+    "Ask me anything!"
+)
 
 SYSTEM_PROMPT = """You are a helpful and friendly voice assistant. This conversation is happening over a phone call, so your responses will be spoken aloud. 
 Please adhere to the following rules:
@@ -39,86 +46,102 @@ if not GOOGLE_API_KEY:
 genai.configure(api_key=GOOGLE_API_KEY)
 
 model = genai.GenerativeModel(
-    model_name='gemini-2.5-flash',
+    model_name="gemini-2.5-flash",
     system_instruction=SYSTEM_PROMPT
 )
 
-sessions = {}
+# Store active chat sessions
+sessions: dict[str, any] = {}
 
 async def gemini_response(chat_session, user_prompt):
-    """Get a response from the Gemini API with timeout handling and profiling."""
+    """
+    Call the Gemini API with timeout handling and return both
+    the response text and the elapsed time for the API call.
+    """
+    start_api = time.time()
     try:
-        start_api = time.time()
         response = await asyncio.wait_for(
             chat_session.send_message_async(user_prompt),
             timeout=15.0
         )
-        api_elapsed = time.time() - start_api
-        print(f"[PROFILE] Gemini API call took {api_elapsed:.2f}s")
-        return response.text
     except asyncio.TimeoutError:
-        return "I'm sorry, I'm having trouble processing that right now. Could you try again?"
+        return "I'm sorry, I'm having trouble processing that right now. Could you try again?", time.time() - start_api
     except Exception as e:
         print(f"Error with Gemini API: {e}")
-        return "I encountered an error. Please try again."
+        return "I encountered an error. Please try again.", time.time() - start_api
 
+    api_elapsed = time.time() - start_api
+    return response.text, api_elapsed
+
+# Create FastAPI app
 app = FastAPI()
 
 @app.post("/twiml")
 async def twiml_endpoint():
+    """Return TwiML to connect Twilio to our WebSocket."""
     xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
-    <Response>
-    <Connect>
-    <ConversationRelay url="{WS_URL}" welcomeGreeting="{WELCOME_GREETING}" ttsProvider="ElevenLabs" voice="FGY2WhTYpPnrIDTdsKH5" />
-    </Connect>
-    </Response>"""
+<Response>
+  <Connect>
+    <ConversationRelay
+      url="{WS_URL}"
+      welcomeGreeting="{WELCOME_GREETING}"
+      ttsProvider="ElevenLabs"
+      voice="FGY2WhTYpPnrIDTdsKH5" />
+  </Connect>
+</Response>"""
     return Response(content=xml_response, media_type="text/xml")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint with detailed profiling."""
     await websocket.accept()
     call_sid = None
+
     try:
         while True:
-            data = await websocket.receive_text()
-            message = json.loads(data)
+            t0 = time.time()
+            raw = await websocket.receive_text()
+            t1 = time.time()
 
-            if message["type"] == "setup":
+            # 1) Parse & preparation
+            parse_start = t1
+            message = json.loads(raw)
+
+            if message.get("type") == "setup":
                 call_sid = message["callSid"]
                 print(f"Setup for call: {call_sid}")
                 sessions[call_sid] = model.start_chat(history=[])
+                continue
 
-            elif message["type"] == "prompt":
-                if not call_sid or call_sid not in sessions:
-                    print(f"Error: Received prompt for unknown call_sid {call_sid}")
-                    continue
+            if message.get("type") != "prompt" or not call_sid:
+                continue
 
-                user_prompt = message["voicePrompt"]
-                print(f"Received prompt: {user_prompt}")
+            prompt_ready = time.time()
+            user_prompt = message["voicePrompt"]
+            print(f"Received prompt: {user_prompt}")
 
-                # Gesamt-Profiling starten
-                start_total = time.time()
+            # 2) Gemini API call
+            api_response, api_time = await gemini_response(sessions[call_sid], user_prompt)
 
-                chat_session = sessions[call_sid]
-                response_text = await gemini_response(chat_session, user_prompt)
+            # 3) Send & serialization
+            send_start = time.time()
+            await websocket.send_text(json.dumps({
+                "type": "text",
+                "token": api_response,
+                "last": True
+            }))
+            send_time = time.time() - send_start
 
-                total_elapsed = time.time() - start_total
-                print(f"[PROFILE] Total turnaround for prompt took {total_elapsed:.2f}s")
+            # 4) Total turnaround
+            total_time = time.time() - t0
 
-                await websocket.send_text(
-                    json.dumps({
-                        "type": "text",
-                        "token": response_text,
-                        "last": True
-                    })
-                )
-                print(f"Sent response: {response_text}")
-
-            elif message["type"] == "interrupt":
-                print(f"Handling interruption for call {call_sid}.")
-
-            else:
-                print(f"Unknown message type received: {message['type']}")
+            # Profiling log
+            print(
+                f"[PROFILE] parse/prep: {(prompt_ready - parse_start):.2f}s | "
+                f"api: {api_time:.2f}s | "
+                f"send: {send_time:.2f}s | "
+                f"total: {total_time:.2f}s"
+            )
 
     except WebSocketDisconnect:
         print(f"WebSocket connection closed for call {call_sid}")
