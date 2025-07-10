@@ -17,8 +17,6 @@ PORT = int(os.getenv("PORT", "8080"))
 DOMAIN = None
 if os.getenv("RAILWAY_STATIC_URL"):
     DOMAIN = os.getenv("RAILWAY_STATIC_URL").replace("https://", "")
-elif os.getenv("NGROK_URL"):
-    DOMAIN = os.getenv("NGROK_URL")
 
 if not DOMAIN:
     raise ValueError("No RAILWAY_STATIC_URL or NGROK_URL environment variable set.")
