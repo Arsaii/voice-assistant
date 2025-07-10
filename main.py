@@ -88,4 +88,56 @@ async def websocket_endpoint(websocket: WebSocket):
     call_sid = None
     
     try:
-        while Tru
+        while True:
+            data = await websocket.receive_text()
+            message = json.loads(data)
+            
+            if message["type"] == "setup":
+                call_sid = message["callSid"]
+                print(f"Setup for call: {call_sid}")
+                # Start a new chat session for this call
+                sessions[call_sid] = model.start_chat(history=[])
+                
+            elif message["type"] == "prompt":
+                if not call_sid or call_sid not in sessions:
+                    print(f"Error: Received prompt for unknown call_sid {call_sid}")
+                    continue
+
+                user_prompt = message["voicePrompt"]
+                print(f"Processing prompt: {user_prompt}")
+                
+                chat_session = sessions[call_sid]
+                response_text = await gemini_response(chat_session, user_prompt)
+                
+                # Send the complete response back to Twilio
+                await websocket.send_text(
+                    json.dumps({
+                        "type": "text",
+                        "token": response_text,
+                        "last": True
+                    })
+                )
+                print(f"Sent response: {response_text}")
+                
+            elif message["type"] == "interrupt":
+                print(f"Handling interruption for call {call_sid}.")
+                
+            else:
+                print(f"Unknown message type received: {message['type']}")
+                
+    except WebSocketDisconnect:
+        print(f"WebSocket connection closed for call {call_sid}")
+        if call_sid in sessions:
+            sessions.pop(call_sid)
+            print(f"Cleared session for call {call_sid}")
+
+# Health check endpoint for cloud platforms
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "domain": DOMAIN}
+
+if __name__ == "__main__":
+    print(f"Starting server on port {PORT}")
+    print(f"WebSocket URL for Twilio: {WS_URL}")
+    print(f"Detected platform domain: {DOMAIN}")
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
