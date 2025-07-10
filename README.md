@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # AI Voice Assistant with Twilio and Google Gemini (Python)
 
 This project creates a AI voice assistant that uses [Twilio Voice](https://www.twilio.com/en-us/voice) and [ConversationRelay](https://www.twilio.com/en-us/products/conversational-ai/conversationrelay), and the [Google Gemini API](https://ai.google.dev/) to engage in two-way conversations over a phone call.
@@ -74,3 +75,6 @@ This application allows users to call a Twilio number and interact with an AI as
 - `requirements.txt`: A file listing the Python dependencies.
 
 - `.env`: A file for storing environment variables like your `GOOGLE_API_KEY` and `NGROK_URL`.
+=======
+# voice-assistant
+>>>>>>> d1cf081808ab3230b535fb7063318dad825f36d7
