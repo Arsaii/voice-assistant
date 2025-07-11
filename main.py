@@ -28,8 +28,7 @@ WS_URL = (
 )
 
 WELCOME_GREETING = (
-    "Hi! I am a voice assistant powered by Twilio and Google Gemini. "
-    "Ask me anything!"
+    "Hello, how can I help?"
 )
 
 SYSTEM_PROMPT = """You are a helpful and friendly voice assistant. This conversation is happening over a phone call, so your responses will be spoken aloud. 
