@@ -1,236 +1,223 @@
 import os
 import json
-import time
-from fastapi import FastAPI, Request, WebSocket, HTTPException, status
-from fastapi.responses import Response
-from twilio.twiml.voice_response import VoiceResponse, Connect, ConversationRelay
-from twilio.base.exceptions import TwilioRestException
-from twilio.rest import Client as TwilioClient # Renamed to avoid conflict
-import google.generativeai as genai
+import uvicorn
 import asyncio
+import time
+import google.generativeai as genai
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response
 from dotenv import load_dotenv
+
+# --- ADDED: Import Twilio TwiML classes ---
+# You need this import for ConversationRelay to be recognized
+from twilio.twiml.voice_response import VoiceResponse, Connect, ConversationRelay
+
 
 # Load environment variables from .env file
 load_dotenv()
 
-app = FastAPI()
-
 # --- Configuration ---
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") # For Gemini
+PORT = int(os.getenv("PORT", "8080"))
 
-# Initialize Twilio Client (used for sending welcome messages if needed, not directly in this flow)
-# Ensure you have your Twilio Account SID and Auth Token set as environment variables
-twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+# Robust domain detection: Railway, ngrok or localhost fallback
+DOMAIN = os.getenv("RAILWAY_STATIC_URL") or os.getenv("NGROK_URL")
+if not DOMAIN:
+    DOMAIN = f"localhost:{PORT}"
+if DOMAIN.startswith("https://"):
+    DOMAIN = DOMAIN.replace("https://", "")
 
-# Configure Google Gemini
+WS_URL = (
+    f"wss://{DOMAIN}/ws"
+    if "localhost" not in DOMAIN
+    else f"ws://{DOMAIN}/ws"
+)
+
+WELCOME_GREETING = (
+    "Hello, how can I help?"
+)
+
+SYSTEM_PROMPT = """You are a helpful and friendly voice assistant. This conversation is happening over a phone call, so your responses will be spoken aloud. 
+Please adhere to the following rules:
+1. Provide clear, concise, and direct answers.
+2. Spell out all numbers (e.g., say 'one thousand two hundred' instead of 1200).
+3. Do not use any special characters like asterisks, bullet points, or emojis.
+4. Keep the conversation natural and engaging."""
+
+# --- Gemini API Initialization ---
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+if not GOOGLE_API_KEY:
+    raise ValueError("GOOGLE_API_KEY environment variable not set.")
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# Gemini model initialization (using a global dict to store chat sessions)
-sessions = {}
+model = genai.GenerativeModel(
+    model_name="gemini-2.5-flash",
+    system_instruction=SYSTEM_PROMPT
+)
 
-# --- WebSocket Endpoint ---
+# Store active chat sessions
+sessions: dict[str, any] = {}
+
+async def gemini_response_streaming(chat_session, user_prompt, websocket):
+    """
+    Call the Gemini API with streaming, sending chunks to the WebSocket
+    as they are received.
+    Returns the full response text and the elapsed time for the API call.
+    """
+    start_api = time.time()
+    full_response_text = ""
+    try:
+        # Use stream=True to get an async iterator of chunks
+        response_stream = await asyncio.wait_for(
+            chat_session.send_message_async(user_prompt, stream=True),
+            timeout=15.0 # Timeout for the initial response from Gemini
+        )
+        
+        async for chunk in response_stream:
+            if chunk.text: # Ensure chunk has text content
+                full_response_text += chunk.text
+                # Send each chunk as a partial message
+                await websocket.send_text(json.dumps({
+                    "type": "text",
+                    "token": chunk.text,
+                    "last": False # Indicate that more content is coming
+                }))
+                # print(f"Sent partial token: '{chunk.text}'") # Uncomment for verbose debugging
+
+        # After all chunks are received, send a final message to signal completion
+        # An empty token with last: True ensures the client knows the message is done.
+        await websocket.send_text(json.dumps({
+            "type": "text",
+            "token": "", # No new token, just a signal
+            "last": True # Signal end of message
+        }))
+
+    except asyncio.TimeoutError:
+        error_message = "I'm sorry, I'm having trouble processing that right now. Could you try again?"
+        await websocket.send_text(json.dumps({
+            "type": "text",
+            "token": error_message,
+            "last": True # This is the final message if timeout occurs
+        }))
+        return error_message, time.time() - start_api
+    except Exception as e:
+        print(f"Error with Gemini API streaming: {e}")
+        error_message = "I encountered an error. Please try again."
+        await websocket.send_text(json.dumps({
+            "type": "text",
+            "token": error_message,
+            "last": True # This is the final message if an error occurs
+        }))
+        return error_message, time.time() - start_api
+
+    api_elapsed = time.time() - start_api
+    return full_response_text, api_elapsed
+
+# Create FastAPI app
+app = FastAPI()
+
+@app.post("/twiml")
+async def twiml_endpoint():
+    """Return TwiML to connect Twilio to our WebSocket."""
+    # --- MODIFIED: Added debug and elevenlabsTextNormalization attributes ---
+    xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <ConversationRelay
+      url="{WS_URL}"
+      welcomeGreeting="{WELCOME_GREETING}"
+      ttsProvider="ElevenLabs"
+      voice="FGY2WhTYpPnrIDTdsKH5"
+      debug="debugging speaker-events tokens-played"          elevenlabsTextNormalization="off"                      />
+  </Connect>
+</Response>"""
+    return Response(content=xml_response, media_type="text/xml")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint with detailed profiling."""
     await websocket.accept()
     call_sid = None
-    chat = None # Initialize chat session
-
-    print(f"WebSocket connection accepted for a new call.")
 
     try:
         while True:
-            t0_loop_start = time.time() # To measure the time for one loop iteration
-            raw_message = await websocket.receive_text()
-            message = json.loads(raw_message)
+            t0 = time.time() # Start of total turnaround time
+            raw = await websocket.receive_text()
+            
+            # 1) Parse & preparation
+            parse_start = time.time() # Start measuring parse/prep
+            message = json.loads(raw)
 
-            # *** IMPORTANT: Print ALL incoming messages for debugging ***
+            # --- MODIFIED: Print ALL incoming messages for debugging ---
             # This is crucial for seeing the debug messages from Twilio
-            print(f"WS Incoming ({time.time():.4f}s from start): {json.dumps(message, indent=2)}")
+            print(f"WS Incoming ({time.time():.4f}s from start of loop): {json.dumps(message, indent=2)}")
 
-            # Handle Twilio setup message
-            if message.get("event") == "start":
-                call_sid = message["start"]["callSid"]
-                stream_sid = message["start"]["streamSid"] # Added stream_sid for full context
-                print(f"[{call_sid}] Setup for call: {call_sid}, Stream SID: {stream_sid}")
-                # Initialize Gemini chat session for this call
-                sessions[call_sid] = genai.GenerativeModel("gemini-2.5-flash").start_chat(history=[])
-                chat = sessions[call_sid]
+
+            if message.get("type") == "setup":
+                call_sid = message["callSid"]
+                print(f"Setup for call: {call_sid}")
+                sessions[call_sid] = model.start_chat(history=[])
                 continue
 
-            # Handle Twilio media (audio) messages (STT results)
-            if message.get("event") == "media":
-                # Only process if it's a "speech_final" event from Twilio's STT
-                if message["media"].get("track") == "inbound" and message["media"].get("status") == "speech_final":
-                    prompt_text = message["media"]["transcript"].strip()
-                    if not prompt_text:
-                        print(f"[{call_sid}] Received empty prompt, skipping.")
-                        continue
+            # --- ADDED: Handle Twilio debug messages (these will now appear) ---
+            # Note: Depending on Twilio's exact implementation, these might come as
+            # "event": "mark" with "name": "debug", or "event": "debug" directly.
+            # Your current code's general `if message.get("type") == "debug"` will catch it
+            # if Twilio sends it as a top-level "type". Otherwise, we'll see it in `WS Incoming` and adapt.
+            if message.get("type") == "debug":
+                print(f"[{call_sid}] [DEBUG MSG] {json.dumps(message['debug'], indent=2)}")
+                continue
 
-                    print(f"[{call_sid}] Received prompt: {prompt_text}")
 
-                    # Profiling start for this turn
-                    profile_start_parse_prep = time.time()
+            if message.get("type") != "prompt" or not call_sid:
+                continue
 
-                    # Your existing prompt processing logic
-                    if chat is None:
-                        # This should ideally not happen if "start" message is handled
-                        print(f"[{call_sid}] Chat session not initialized, re-initializing.")
-                        sessions[call_sid] = genai.GenerativeModel("gemini-2.5-flash").start_chat(history=[])
-                        chat = sessions[call_sid]
+            user_prompt = message["voicePrompt"]
+            print(f"Received prompt: {user_prompt}")
+            parse_prep_time = time.time() - parse_start # End measuring parse/prep
 
-                    # Profiling end for parse/prep
-                    profile_end_parse_prep = time.time()
+            # 2) Gemini API call (now with streaming)
+            # This function now sends responses directly to the websocket
+            api_response_full_text, api_time = await gemini_response_streaming(
+                sessions[call_sid], user_prompt, websocket
+            )
 
-                    # Gemini API call and streaming chunks back to Twilio
-                    response_text_chunks = []
-                    profile_start_api_sending_chunks = time.time()
+            # 3) Send & serialization (This step is now integrated into gemini_response_streaming,
+            #    so we're measuring the time until all chunks are sent, rather than one big send)
+            # The 'send_time' here will be minimal as the actual sending happens within the streaming function.
+            # We can re-evaluate what 'send_time' means in a streaming context.
+            # For this profiling, 'api_time' now implicitly includes the time taken to send all chunks.
 
-                    try:
-                        # Generate content from Gemini
-                        gemini_response = await asyncio.to_thread(chat.send_message, prompt_text, stream=True)
+            # 4) Total turnaround
+            total_time = time.time() - t0
 
-                        for chunk in gemini_response:
-                            if chunk.text: # Ensure there's text in the chunk
-                                response_text_chunks.append(chunk.text)
-                                # Send chunk to Twilio ConversationRelay
-                                await websocket.send_text(json.dumps({
-                                    "type": "text",
-                                    "token": chunk.text,
-                                    "last": False # Not the last chunk yet
-                                }))
-                                # print(f"[{call_sid}] Sent chunk: '{chunk.text}'") # Uncomment for very verbose logging
-                        
-                        # Send the final 'last: true' message to Twilio
-                        await websocket.send_text(json.dumps({
-                            "type": "text",
-                            "token": "", # Can be empty for the last token
-                            "last": True
-                        }))
-                        print(f"[{call_sid}] Sent final 'last: true' message.")
+            # Profiling log
+            # Note: parse/prep is measured until user_prompt is extracted.
+            # api_time includes the time to receive all chunks AND send them over the websocket.
+            # The 'send' part of the original profile is now mostly absorbed into 'api_time'
+            # because the websocket sends happen during the API streaming.
+            print(
+                f"[PROFILE] parse/prep: {parse_prep_time:.4f}s | "
+                f"api_and_sending_chunks: {api_time:.4f}s | " # Renamed for clarity
+                f"total_turnaround: {total_time:.4f}s"
+            )
 
-                    except Exception as e:
-                        print(f"[{call_sid}] Error during Gemini API call or sending chunks: {e}")
-                        # Send an error message back to the user via TTS
-                        await websocket.send_text(json.dumps({
-                            "type": "text",
-                            "token": "I'm sorry, I encountered an error. Please try again.",
-                            "last": True
-                        }))
-                    
-                    profile_end_api_sending_chunks = time.time()
-
-                    # Total turnaround time for this prompt
-                    total_turnaround_time = time.time() - t0_loop_start # From when prompt was received to after sending 'last:true'
-
-                    print(f"[{call_sid}] [PROFILE] parse/prep: {profile_end_parse_prep - profile_start_parse_prep:.4f}s | "
-                          f"api_and_sending_chunks: {profile_end_api_sending_chunks - profile_start_api_sending_chunks:.4f}s | "
-                          f"total_turnaround: {total_turnaround_time:.4f}s") # This `total_turnaround` is misleading, it's just the loop duration
-
-                elif message["media"].get("track") == "inbound" and message["media"].get("status") == "speech_interim":
-                    # print(f"[{call_sid}] Interim transcript: {message['media']['transcript']}")
-                    pass # You can process interim results if needed for interruption handling etc.
-
-            # Handle Twilio mark (acknowledgement) messages
-            elif message.get("event") == "mark":
-                print(f"[{call_sid}] Received mark: {message['mark']['name']}")
-
-            # Handle Twilio stop message (call ended)
-            elif message.get("event") == "stop":
-                print(f"[{call_sid}] WebSocket connection closed for call {call_sid}")
-                if call_sid in sessions:
-                    del sessions[call_sid]
-                    print(f"[{call_sid}] Cleared session for call {call_sid}")
-                break # Exit the WebSocket loop
-
-            # Handle Twilio debug messages (NEW - CRITICAL FOR YOU)
-            elif message.get("type") == "debug":
-                print(f"[{call_sid}] [DEBUG MSG] {json.dumps(message, indent=2)}")
-                # Pay close attention to 'speaker-events' and 'tokens-played' here
-                # Example:
-                # {"type": "debug", "debug": {"event": "speaker-events", "name": "agentSpeakingStarted", "timestamp": "..."}}
-                # {"type": "debug", "debug": {"event": "tokens-played", "tokens": [{"token": "Hello,", "start": "...", "end": "..."}], "timestamp": "..."}}
-                # Compare these timestamps with your server's `api_and_sending_chunks` end time.
-
+    except WebSocketDisconnect:
+        print(f"WebSocket connection closed for call {call_sid}")
+        sessions.pop(call_sid, None)
+        print(f"Cleared session for call {call_sid}")
     except Exception as e:
-        print(f"WebSocket error for call {call_sid}: {e}")
-    finally:
-        if websocket.client_state == 1: # WebSocketState.CONNECTED
-            await websocket.close()
-        print(f"INFO:     connection closed for call {call_sid}")
+        print(f"Unexpected error in websocket_endpoint: {e}")
+        if call_sid and call_sid in sessions:
+            sessions.pop(call_sid, None) # Clean up session on unexpected error
 
-
-# --- TwiML Webhook Endpoint ---
-
-@app.post("/twiml")
-async def twiml_webhook(request: Request):
-    """
-    Twilio will hit this endpoint when a call comes in.
-    It tells Twilio to connect to our WebSocket server for real-time interaction.
-    """
-    try:
-        # You can get call information from request.form if needed
-        # call_sid = request.form.get("CallSid")
-        
-        response = VoiceResponse()
-        connect = Connect()
-        
-        # NOTE: Railway's public URL format might be different for your deployment.
-        # Make sure this is the correct external URL where your WebSocket is accessible.
-        # It's usually your Railway app's domain.railway.app/ws
-        websocket_url = os.getenv("WEBSOCKET_URL", "wss://your-railway-app-domain.railway.app/ws")
-
-        # Welcome greeting can be handled by ConversationRelay directly.
-        # This will be played by ElevenLabs at the start of the call.
-        welcome_greeting = "Hello, I am your AI assistant. How can I help you today?"
-
-        # --- CRITICAL DEBUGGING ATTRIBUTES ADDED HERE ---
-        # "debugging": Provides general debug info
-        # "speaker-events": Sends messages when agent starts/stops speaking
-        # "tokens-played": Sends messages about which tokens were played and their timing
-        # "elevenlabsTextNormalization="off": Can slightly reduce latency for ElevenLabs
-        
-        connect.conversation_relay(
-            url=websocket_url,
-            welcome_greeting=welcome_greeting,
-            tts_provider="ElevenLabs",
-            voice="FGY2WhTYpPnrIDTdsKH5", # Ensure this is an ElevenLabs voice
-            debug="debugging speaker-events tokens-played", # <-- ADDED DEBUGGING
-            elevenlabs_text_normalization="off" # <-- ADDED TO REDUCE POTENTIAL LATENCY
-        )
-        response.append(connect)
-        
-        print(f"Returning TwiML: {response}")
-        return Response(content=str(response), media_type="application/xml")
-
-    except Exception as e:
-        print(f"Error in TwiML webhook: {e}")
-        # Return a simple voice response for error
-        response = VoiceResponse()
-        response.say("I am sorry, there was an error connecting. Please try again.")
-        return Response(content=str(response), media_type="application/xml"), status.HTTP_500_INTERNAL_SERVER_ERROR
-
-# --- Health Check Endpoint (Optional but Recommended for Deployments) ---
 @app.get("/health")
 async def health_check():
-    return {"status": "ok"}
+    return {"status": "healthy", "domain": DOMAIN}
 
-# --- For local testing (if you run 'python main.py') ---
-# This part is typically not used in a production Docker deployment like Railway,
-# where uvicorn is started via a command.
 if __name__ == "__main__":
-    import uvicorn
-    # Make sure to set WEBSOCKET_URL in your environment or .env file
-    # For local testing, it might be ws://localhost:8000/ws
-    # For Ngrok, it would be wss://your-ngrok-domain.ngrok.io/ws
-    # For Railway, wss://your-railway-app-domain.railway.app/ws
-    
-    # Example for local development with Ngrok
-    # If using ngrok, your WEBSOCKET_URL should be like "wss://<ngrok_id>.ngrok-free.app/ws"
-    # And your Twilio webhook for incoming calls should point to "https://<ngrok_id>.ngrok-free.app/twiml"
-    
-    print(f"Starting server with WebSocket URL: {os.getenv('WEBSOCKET_URL')}")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print(f"Starting server on port {PORT}")
+    print(f"WebSocket URL for Twilio: {WS_URL}")
+    print(f"Detected platform domain: {DOMAIN}")
+    # Ensure workers is appropriate for your server's CPU cores and expected load.
+    # For a typical voice assistant, 2 workers is a reasonable starting point.
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT, workers=2)
