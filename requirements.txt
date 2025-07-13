@@ -4,3 +4,4 @@ uvicorn
 fastapi
 websockets
 twilio
+aiohttp

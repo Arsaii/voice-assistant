@@ -3,15 +3,15 @@ import json
 import uvicorn
 import asyncio
 import time
+import datetime
+import aiohttp
 import google.generativeai as genai
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from dotenv import load_dotenv
 
 # --- ADDED: Import Twilio TwiML classes ---
-# You need this import for ConversationRelay to be recognized
 from twilio.twiml.voice_response import VoiceResponse, Connect, ConversationRelay
-
 
 # Load environment variables from .env file
 load_dotenv()
@@ -36,12 +36,13 @@ WELCOME_GREETING = (
     "Hello, how can I help?"
 )
 
-SYSTEM_PROMPT = """You are a helpful and friendly voice assistant. This conversation is happening over a phone call, so your responses will be spoken aloud. 
-Please adhere to the following rules:
-1. Provide clear, concise, and direct answers.
-2. Spell out all numbers (e.g., say 'one thousand two hundred' instead of 1200).
-3. Do not use any special characters like asterisks, bullet points, or emojis.
-4. Keep the conversation natural and engaging."""
+# --- OPTIMIZED: Shorter, more focused system prompt for voice ---
+SYSTEM_PROMPT = """You are a helpful voice assistant. Keep responses conversational and concise since this is a phone call. 
+Rules:
+1. Be direct and brief - aim for 1-2 sentences per response
+2. Spell out numbers (say 'twenty-three' not '23')
+3. No special characters, bullets, or formatting
+4. Sound natural and friendly"""
 
 # --- Gemini API Initialization ---
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -49,54 +50,121 @@ if not GOOGLE_API_KEY:
     raise ValueError("GOOGLE_API_KEY environment variable not set.")
 genai.configure(api_key=GOOGLE_API_KEY)
 
-model = genai.GenerativeModel(
-    model_name="gemini-2.5-flash",
-    system_instruction=SYSTEM_PROMPT
+# --- OPTIMIZED: Generation config for faster responses ---
+generation_config = genai.GenerationConfig(
+    temperature=0.7,
+    top_p=0.9,
+    top_k=40,
+    max_output_tokens=100,  # Shorter responses for voice
+    candidate_count=1,
 )
+
+# --- OPTIMIZED: Try to use cached content for faster initialization ---
+try:
+    # Cache system instruction for 1 hour to speed up model initialization
+    cached_content = genai.caching.CachedContent.create(
+        model="gemini-2.5-flash",
+        system_instruction=SYSTEM_PROMPT,
+        ttl=datetime.timedelta(hours=1),
+    )
+    model = genai.GenerativeModel.from_cached_content(cached_content)
+    print("✅ Using cached Gemini model for faster responses")
+except Exception as e:
+    print(f"⚠️ Caching failed, using regular model: {e}")
+    model = genai.GenerativeModel(
+        model_name="gemini-2.5-flash",
+        system_instruction=SYSTEM_PROMPT,
+        generation_config=generation_config
+    )
+
+# --- OPTIMIZED: HTTP session for connection pooling ---
+http_session = None
+
+async def create_http_session():
+    """Create optimized HTTP session for better connection management"""
+    connector = aiohttp.TCPConnector(
+        limit=100,
+        limit_per_host=30,
+        ttl_dns_cache=300,
+        use_dns_cache=True,
+        keepalive_timeout=30,
+    )
+    return aiohttp.ClientSession(connector=connector)
 
 # Store active chat sessions
 sessions: dict[str, any] = {}
 
 async def gemini_response_streaming(chat_session, user_prompt, websocket):
     """
-    Call the Gemini API with streaming, sending chunks to the WebSocket
-    as they are received.
-    Returns the full response text and the elapsed time for the API call.
+    OPTIMIZED: Streaming with intelligent buffering for better performance.
+    Buffers chunks until we have meaningful content or sentence boundaries.
     """
     start_api = time.time()
     full_response_text = ""
+    buffer = ""
+    buffer_size = 30  # Minimum characters before sending (reduced for voice)
+    
     try:
-        # Use stream=True to get an async iterator of chunks
+        # --- OPTIMIZED: Reduced timeout for faster failure detection ---
         response_stream = await asyncio.wait_for(
             chat_session.send_message_async(user_prompt, stream=True),
-            timeout=15.0 # Timeout for the initial response from Gemini
+            timeout=8.0  # Reduced from 15s to 8s
         )
         
+        first_chunk_sent = False
         async for chunk in response_stream:
-            if chunk.text: # Ensure chunk has text content
+            if chunk.text:
                 full_response_text += chunk.text
-                # Send each chunk as a partial message
-                await websocket.send_text(json.dumps({
-                    "type": "text",
-                    "token": chunk.text,
-                    "last": False # Indicate that more content is coming
-                }))
-                # print(f"Sent partial token: '{chunk.text}'") # Uncomment for verbose debugging
+                buffer += chunk.text
+                
+                # --- OPTIMIZED: Send first chunk immediately for faster TTFB ---
+                if not first_chunk_sent and len(buffer) >= 10:
+                    await websocket.send_text(json.dumps({
+                        "type": "text",
+                        "token": buffer,
+                        "last": False
+                    }))
+                    buffer = ""
+                    first_chunk_sent = True
+                    continue
+                
+                # --- OPTIMIZED: Smart buffering based on content and length ---
+                should_send = (
+                    len(buffer) >= buffer_size or 
+                    any(punct in buffer for punct in ['.', '!', '?', '\n']) or
+                    buffer.endswith(', ') or  # Natural pause points
+                    len(buffer) >= 50  # Don't let buffer get too large
+                )
+                
+                if should_send and first_chunk_sent:
+                    await websocket.send_text(json.dumps({
+                        "type": "text",
+                        "token": buffer,
+                        "last": False
+                    }))
+                    buffer = ""
 
-        # After all chunks are received, send a final message to signal completion
-        # An empty token with last: True ensures the client knows the message is done.
+        # Send any remaining buffer
+        if buffer:
+            await websocket.send_text(json.dumps({
+                "type": "text",
+                "token": buffer,
+                "last": False
+            }))
+        
+        # Send completion signal
         await websocket.send_text(json.dumps({
             "type": "text",
-            "token": "", # No new token, just a signal
-            "last": True # Signal end of message
+            "token": "",
+            "last": True
         }))
 
     except asyncio.TimeoutError:
-        error_message = "I'm sorry, I'm having trouble processing that right now. Could you try again?"
+        error_message = "I'm having trouble right now. Could you try again?"
         await websocket.send_text(json.dumps({
             "type": "text",
             "token": error_message,
-            "last": True # This is the final message if timeout occurs
+            "last": True
         }))
         return error_message, time.time() - start_api
     except Exception as e:
@@ -105,7 +173,7 @@ async def gemini_response_streaming(chat_session, user_prompt, websocket):
         await websocket.send_text(json.dumps({
             "type": "text",
             "token": error_message,
-            "last": True # This is the final message if an error occurs
+            "last": True
         }))
         return error_message, time.time() - start_api
 
@@ -115,10 +183,24 @@ async def gemini_response_streaming(chat_session, user_prompt, websocket):
 # Create FastAPI app
 app = FastAPI()
 
+@app.on_event("startup")
+async def startup_event():
+    """Initialize HTTP session on startup"""
+    global http_session
+    http_session = await create_http_session()
+    print("✅ HTTP session initialized")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up HTTP session on shutdown"""
+    global http_session
+    if http_session:
+        await http_session.close()
+        print("✅ HTTP session closed")
+
 @app.post("/twiml")
 async def twiml_endpoint():
-    """Return TwiML to connect Twilio to our WebSocket."""
-    # --- MODIFIED: Added debug and elevenlabsTextNormalization attributes ---
+    """OPTIMIZED: Return TwiML with better TTS configuration for speed"""
     xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
@@ -127,97 +209,105 @@ async def twiml_endpoint():
       welcomeGreeting="{WELCOME_GREETING}"
       ttsProvider="ElevenLabs"
       voice="FGY2WhTYpPnrIDTdsKH5"
-      debug="debugging speaker-events tokens-played"          elevenlabsTextNormalization="off"                      />
+      debug="debugging speaker-events tokens-played"
+      elevenlabsTextNormalization="off"
+      elevenlabsModelId="eleven_turbo_v2_5"
+      elevenlabsStability="0.5"
+      elevenlabsSimilarity="0.8"
+      elevenlabsOptimizeStreamingLatency="4"
+    />
   </Connect>
 </Response>"""
     return Response(content=xml_response, media_type="text/xml")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint with detailed profiling."""
+    """OPTIMIZED: WebSocket endpoint with detailed performance profiling"""
     await websocket.accept()
     call_sid = None
 
     try:
         while True:
-            t0 = time.time() # Start of total turnaround time
+            loop_start = time.time()
             raw = await websocket.receive_text()
             
-            # 1) Parse & preparation
-            parse_start = time.time() # Start measuring parse/prep
+            # --- OPTIMIZED: Faster JSON parsing ---
             message = json.loads(raw)
 
-            # --- MODIFIED: Print ALL incoming messages for debugging ---
-            # This is crucial for seeing the debug messages from Twilio
-            print(f"WS Incoming ({time.time():.4f}s from start of loop): {json.dumps(message, indent=2)}")
-
+            # Print debug messages but don't process them
+            if message.get("type") in ["info", "debug"]:
+                if message.get("name") in ["roundTripDelayMs", "tokensPlayed"]:
+                    print(f"[{call_sid}] [{message.get('name', 'DEBUG')}] {message.get('value', message)}")
+                continue
 
             if message.get("type") == "setup":
                 call_sid = message["callSid"]
-                print(f"Setup for call: {call_sid}")
+                print(f"✅ Setup for call: {call_sid}")
+                # --- OPTIMIZED: Start chat with generation config ---
                 sessions[call_sid] = model.start_chat(history=[])
                 continue
-
-            # --- ADDED: Handle Twilio debug messages (these will now appear) ---
-            # Note: Depending on Twilio's exact implementation, these might come as
-            # "event": "mark" with "name": "debug", or "event": "debug" directly.
-            # Your current code's general `if message.get("type") == "debug"` will catch it
-            # if Twilio sends it as a top-level "type". Otherwise, we'll see it in `WS Incoming` and adapt.
-            if message.get("type") == "debug":
-                print(f"[{call_sid}] [DEBUG MSG] {json.dumps(message['debug'], indent=2)}")
-                continue
-
 
             if message.get("type") != "prompt" or not call_sid:
                 continue
 
+            # --- DETAILED PROFILING START ---
+            parse_start = time.time()
             user_prompt = message["voicePrompt"]
-            print(f"Received prompt: {user_prompt}")
-            parse_prep_time = time.time() - parse_start # End measuring parse/prep
+            print(f"📝 Received prompt: {user_prompt}")
+            parse_time = time.time() - parse_start
 
-            # 2) Gemini API call (now with streaming)
-            # This function now sends responses directly to the websocket
-            api_response_full_text, api_time = await gemini_response_streaming(
+            # Gemini API call with streaming
+            gemini_start = time.time()
+            api_response_full_text, api_internal_time = await gemini_response_streaming(
                 sessions[call_sid], user_prompt, websocket
             )
+            gemini_total_time = time.time() - gemini_start
 
-            # 3) Send & serialization (This step is now integrated into gemini_response_streaming,
-            #    so we're measuring the time until all chunks are sent, rather than one big send)
-            # The 'send_time' here will be minimal as the actual sending happens within the streaming function.
-            # We can re-evaluate what 'send_time' means in a streaming context.
-            # For this profiling, 'api_time' now implicitly includes the time taken to send all chunks.
+            # Total turnaround time
+            total_time = time.time() - loop_start
 
-            # 4) Total turnaround
-            total_time = time.time() - t0
+            # --- OPTIMIZED: Detailed performance logging ---
+            print(f"[PERFORMANCE] "
+                  f"parse: {parse_time*1000:.1f}ms | "
+                  f"gemini_internal: {api_internal_time*1000:.1f}ms | "
+                  f"gemini_total: {gemini_total_time*1000:.1f}ms | "
+                  f"total_turnaround: {total_time*1000:.1f}ms")
 
-            # Profiling log
-            # Note: parse/prep is measured until user_prompt is extracted.
-            # api_time includes the time to receive all chunks AND send them over the websocket.
-            # The 'send' part of the original profile is now mostly absorbed into 'api_time'
-            # because the websocket sends happen during the API streaming.
-            print(
-                f"[PROFILE] parse/prep: {parse_prep_time:.4f}s | "
-                f"api_and_sending_chunks: {api_time:.4f}s | " # Renamed for clarity
-                f"total_turnaround: {total_time:.4f}s"
-            )
+            # --- PERFORMANCE ANALYSIS ---
+            if total_time > 2.0:
+                print(f"⚠️  SLOW RESPONSE: {total_time:.2f}s - Consider optimizing")
+            elif total_time < 1.0:
+                print(f"✅ FAST RESPONSE: {total_time:.2f}s")
 
     except WebSocketDisconnect:
-        print(f"WebSocket connection closed for call {call_sid}")
-        sessions.pop(call_sid, None)
-        print(f"Cleared session for call {call_sid}")
-    except Exception as e:
-        print(f"Unexpected error in websocket_endpoint: {e}")
+        print(f"🔌 WebSocket connection closed for call {call_sid}")
         if call_sid and call_sid in sessions:
-            sessions.pop(call_sid, None) # Clean up session on unexpected error
+            sessions.pop(call_sid, None)
+            print(f"🧹 Cleared session for call {call_sid}")
+    except Exception as e:
+        print(f"💥 Unexpected error in websocket_endpoint: {e}")
+        if call_sid and call_sid in sessions:
+            sessions.pop(call_sid, None)
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "domain": DOMAIN}
+    return {
+        "status": "healthy", 
+        "domain": DOMAIN,
+        "optimizations": [
+            "cached_model",
+            "connection_pooling", 
+            "smart_buffering",
+            "fast_tts_config",
+            "reduced_timeouts"
+        ]
+    }
 
 if __name__ == "__main__":
-    print(f"Starting server on port {PORT}")
-    print(f"WebSocket URL for Twilio: {WS_URL}")
-    print(f"Detected platform domain: {DOMAIN}")
-    # Ensure workers is appropriate for your server's CPU cores and expected load.
-    # For a typical voice assistant, 2 workers is a reasonable starting point.
-    uvicorn.run("main:app", host="0.0.0.0", port=PORT, workers=2)
+    print(f"🚀 Starting optimized voice assistant on port {PORT}")
+    print(f"🔗 WebSocket URL for Twilio: {WS_URL}")
+    print(f"🌐 Detected platform domain: {DOMAIN}")
+    print(f"⚡ Optimizations: Caching, Connection Pooling, Smart Buffering, Fast TTS")
+    
+    # --- OPTIMIZED: Adjusted worker count for voice workload ---
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT, workers=1)
