@@ -3,11 +3,11 @@ import json
 import uvicorn
 import asyncio
 import time
-import datetime
 import aiohttp
 import google.generativeai as genai
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
 # --- ADDED: Import Twilio TwiML classes ---
@@ -59,23 +59,12 @@ generation_config = genai.GenerationConfig(
     candidate_count=1,
 )
 
-# --- OPTIMIZED: Try to use cached content for faster initialization ---
-try:
-    # Cache system instruction for 1 hour to speed up model initialization
-    cached_content = genai.caching.CachedContent.create(
-        model="gemini-2.5-flash",
-        system_instruction=SYSTEM_PROMPT,
-        ttl=datetime.timedelta(hours=1),
-    )
-    model = genai.GenerativeModel.from_cached_content(cached_content)
-    print("✅ Using cached Gemini model for faster responses")
-except Exception as e:
-    print(f"⚠️ Caching failed, using regular model: {e}")
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        system_instruction=SYSTEM_PROMPT,
-        generation_config=generation_config
-    )
+# --- OPTIMIZED: Regular model with generation config (caching removed due to size limit) ---
+model = genai.GenerativeModel(
+    model_name="gemini-2.5-flash",
+    system_instruction=SYSTEM_PROMPT,
+    generation_config=generation_config
+)
 
 # --- OPTIMIZED: HTTP session for connection pooling ---
 http_session = None
@@ -93,6 +82,24 @@ async def create_http_session():
 
 # Store active chat sessions
 sessions: dict[str, any] = {}
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """FastAPI lifespan event handler (replaces deprecated startup/shutdown events)"""
+    # Startup
+    global http_session
+    http_session = await create_http_session()
+    print("✅ HTTP session initialized")
+    
+    yield
+    
+    # Shutdown
+    if http_session:
+        await http_session.close()
+        print("✅ HTTP session closed")
+
+# Create FastAPI app with lifespan
+app = FastAPI(lifespan=lifespan)
 
 async def gemini_response_streaming(chat_session, user_prompt, websocket):
     """
@@ -295,7 +302,6 @@ async def health_check():
         "status": "healthy", 
         "domain": DOMAIN,
         "optimizations": [
-            "cached_model",
             "connection_pooling", 
             "smart_buffering",
             "fast_tts_config",
@@ -307,7 +313,7 @@ if __name__ == "__main__":
     print(f"🚀 Starting optimized voice assistant on port {PORT}")
     print(f"🔗 WebSocket URL for Twilio: {WS_URL}")
     print(f"🌐 Detected platform domain: {DOMAIN}")
-    print(f"⚡ Optimizations: Caching, Connection Pooling, Smart Buffering, Fast TTS")
+    print(f"⚡ Optimizations: Connection Pooling, Smart Buffering, Fast TTS")
     
     # --- OPTIMIZED: Adjusted worker count for voice workload ---
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, workers=1)
