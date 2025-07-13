@@ -59,11 +59,32 @@ generation_config = genai.GenerationConfig(
     candidate_count=1,
 )
 
-# --- OPTIMIZED: Regular model with generation config (caching removed due to size limit) ---
+# --- ADDED: Safety settings to prevent false positives ---
+safety_settings = [
+    {
+        "category": "HARM_CATEGORY_HARASSMENT",
+        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+    },
+    {
+        "category": "HARM_CATEGORY_HATE_SPEECH",
+        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+    },
+    {
+        "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+    },
+    {
+        "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+    }
+]
+
+# --- OPTIMIZED: Regular model with generation config and safety settings ---
 model = genai.GenerativeModel(
-    model_name="gemini-2.5-flash",
+    model_name="gemini-1.5-flash",  # More stable than 2.5-flash
     system_instruction=SYSTEM_PROMPT,
-    generation_config=generation_config
+    generation_config=generation_config,
+    safety_settings=safety_settings
 )
 
 # --- OPTIMIZED: HTTP session for connection pooling ---
@@ -120,7 +141,7 @@ async def gemini_response_streaming(chat_session, user_prompt, websocket):
         
         first_chunk_sent = False
         async for chunk in response_stream:
-            if chunk.text:
+            if chunk.text:  # This is where the error occurred
                 full_response_text += chunk.text
                 buffer += chunk.text
                 
@@ -150,6 +171,24 @@ async def gemini_response_streaming(chat_session, user_prompt, websocket):
                         "last": False
                     }))
                     buffer = ""
+            elif chunk.candidates and chunk.candidates[0].finish_reason:
+                # --- ADDED: Handle safety blocks and other finish reasons ---
+                finish_reason = chunk.candidates[0].finish_reason
+                if finish_reason == 2:  # SAFETY
+                    error_message = "I'm sorry, I can't respond to that right now. Could you try rephrasing your question?"
+                elif finish_reason == 3:  # RECITATION
+                    error_message = "I apologize, but I need to avoid that response. Could you ask something else?"
+                elif finish_reason == 4:  # OTHER
+                    error_message = "I'm having trouble with that request. Could you try again?"
+                else:
+                    error_message = "I encountered an issue. Please try again."
+                
+                await websocket.send_text(json.dumps({
+                    "type": "text",
+                    "token": error_message,
+                    "last": True
+                }))
+                return error_message, time.time() - start_api
 
         # Send any remaining buffer
         if buffer:
@@ -175,7 +214,10 @@ async def gemini_response_streaming(chat_session, user_prompt, websocket):
         }))
         return error_message, time.time() - start_api
     except Exception as e:
-        print(f"Error with Gemini API streaming: {e}")
+        import traceback
+        print(f"💥 ERROR with Gemini API streaming: {e}")
+        print(f"💥 ERROR TYPE: {type(e)}")
+        print(f"💥 FULL TRACEBACK: {traceback.format_exc()}")
         error_message = "I encountered an error. Please try again."
         await websocket.send_text(json.dumps({
             "type": "text",
