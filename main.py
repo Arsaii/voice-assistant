@@ -4,7 +4,6 @@ import uvicorn
 import asyncio
 import time
 import aiohttp
-
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from contextlib import asynccontextmanager
@@ -52,18 +51,13 @@ Rules:
 4. Sound natural and friendly"""
 
 # --- OPTIMIZED: Generation config for faster responses (mapped to Groq params) ---
-# Note: Groq's API might not support all specific parameters like top_k directly,
-# but it supports temperature, top_p, and max_tokens.
 generation_params = {
     "temperature": 0.7,
     "top_p": 0.9,
     "max_tokens": 100, # Shorter responses for voice
 }
 
-# --- REMOVED: Safety settings (Groq doesn't expose these directly via API params,
-# but their models have inherent safety training) ---
-
-# --- NEW: Groq LLM Client Class ---
+# --- Groq LLM Client Class ---
 class GroqLLMClient:
     """
     Client to interact with Groq's LLaMA API.
@@ -130,8 +124,6 @@ class GroqLLMClient:
                                     class LLMChunk:
                                         def __init__(self, text_content="", finish_reason_code=None):
                                             self.text = text_content
-                                            # Groq's response structure is similar to OpenAI, no 'candidates' object but finish_reason in choices
-                                            # We'll adapt it to match the previous structure for easier integration.
                                             self.candidates = [type('obj', (object,), {'finish_reason': finish_reason_code})()] if finish_reason_code else []
 
                                     yield LLMChunk(text, finish_reason)
@@ -166,27 +158,13 @@ async def create_http_session():
 # Store active chat sessions (now GroqLLMClient instances)
 sessions: dict[str, GroqLLMClient] = {}
 
-# Global Groq Client (initialized in lifespan)
-groq_client_instance: GroqLLMClient = None
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan event handler (replaces deprecated startup/shutdown events)"""
     # Startup
-    global http_session, groq_client_instance
+    global http_session
     http_session = await create_http_session()
     print("✅ HTTP session initialized")
-    
-    # Initialize the global Groq client instance
-    # Each WebSocket session will get its own history via a new GroqLLMClient instance
-    # that uses this shared http_session.
-    # We create a placeholder client here that will be used to initialize per-call sessions
-    # (or could be used if you wanted a single shared history across calls - not recommended for voice)
-    
-    # NOTE: The GroqLLMClient manages its own history.
-    # So, we don't need a "global" groq_client_instance that holds history.
-    # Instead, each call_sid will create its own GroqLLMClient in websocket_endpoint.
-    # We still need the http_session to be global.
     
     yield
     
@@ -197,6 +175,16 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI app with lifespan
 app = FastAPI(lifespan=lifespan)
+
+# --- ADDED: HTTP GET endpoint for /ws to satisfy Twilio's initial check ---
+@app.get("/ws")
+async def ws_http_get():
+    """
+    Dummy HTTP GET endpoint for /ws to satisfy Twilio's initial HTTP check.
+    The actual WebSocket connection will be handled by the @app.websocket("/ws") handler.
+    """
+    return {"message": "WebSocket endpoint is ready for upgrade."}
+
 
 # RENAMED: gemini_response_streaming -> groq_response_streaming
 async def groq_response_streaming(groq_chat_client: GroqLLMClient, user_prompt: str, websocket: WebSocket):
@@ -262,6 +250,12 @@ async def groq_response_streaming(groq_chat_client: GroqLLMClient, user_prompt: 
                 # Groq/Llama models have built-in safety, but if a content filter is triggered:
                 if finish_reason == 'content_filter':
                     error_message = "I'm sorry, I can't respond to that right now. Could you try rephrasing your question?"
+                    await websocket.send_text(json.dumps({
+                        "type": "text",
+                        "token": error_message,
+                        "last": True
+                    }))
+                    return error_message, time.time() - start_api
                 elif finish_reason == 'length':
                     # This means max_tokens was hit. The response is complete up to that point.
                     pass # Don't error out, just proceed to send remaining buffer and finish signal
