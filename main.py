@@ -152,7 +152,7 @@ async def gemini_response_streaming(chat_session, user_prompt, websocket):
     start_api = time.time()
     full_response_text = ""
     buffer = ""
-    buffer_size = 30  # Minimum characters before sending (reduced for voice)
+    buffer_size = 20  # Minimum characters before sending (reduced for even faster response)
     
     try:
         # --- OPTIMIZED: Reduced timeout for faster failure detection ---
@@ -161,7 +161,7 @@ async def gemini_response_streaming(chat_session, user_prompt, websocket):
         
         response_stream = await asyncio.wait_for(
             chat_session.send_message_async(user_prompt, stream=True),
-            timeout=8.0  # Reduced from 15s to 8s
+            timeout=6.0  # Reduced from 8s to 6s
         )
         
         api_call_time = time.time() - api_call_start
@@ -185,7 +185,7 @@ async def gemini_response_streaming(chat_session, user_prompt, websocket):
                 buffer += chunk.text
                 
                 # --- OPTIMIZED: Send first chunk immediately for faster TTFB ---
-                if not first_chunk_sent and len(buffer) >= 10:
+                if not first_chunk_sent and len(buffer) >= 5:  # Even smaller first chunk
                     send_start = time.time()
                     await websocket.send_text(json.dumps({
                         "type": "text",
@@ -337,13 +337,13 @@ async def twiml_endpoint():
       elevenlabsSimilarity="0.8"
       elevenlabsOptimizeStreamingLatency="5"
       elevenlabsRequestTimeoutMs="3000"
-      vadSilenceMs="300"
-      vadThreshold="0.25"
+      vadSilenceMs="200"
+      vadThreshold="0.2"
       vadMode="aggressive"
-      vadDebounceMs="50"
-      vadPreambleMs="200"
-      vadPostambleMs="100"
-      vadMinSpeechMs="200"
+      vadDebounceMs="25"
+      vadPreambleMs="100"
+      vadPostambleMs="50"
+      vadMinSpeechMs="150"
       vadMaxSpeechMs="10000"
     />
   </Connect>
