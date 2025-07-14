@@ -4,7 +4,7 @@ import uvicorn
 import asyncio
 import time
 import aiohttp
-import google.generativeai as genai
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from contextlib import asynccontextmanager
@@ -18,6 +18,13 @@ load_dotenv()
 
 # --- Configuration ---
 PORT = int(os.getenv("PORT", "8080"))
+
+# --- Groq API Configuration ---
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL_NAME = os.getenv("GROQ_MODEL_NAME", "llama-3.1-8b-instant") # Default Groq Llama 3.1 8B
+
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY environment variable not set.")
 
 # Robust domain detection: Railway, ngrok or localhost fallback
 DOMAIN = os.getenv("RAILWAY_STATIC_URL") or os.getenv("NGROK_URL")
@@ -37,55 +44,109 @@ WELCOME_GREETING = (
 )
 
 # --- OPTIMIZED: Shorter, more focused system prompt for voice ---
-SYSTEM_PROMPT = """You are a helpful voice assistant. Keep responses conversational and concise since this is a phone call. 
+SYSTEM_PROMPT = """You are a helpful voice assistant. Keep responses conversational and concise since this is a phone call.
 Rules:
 1. Be direct and brief - aim for 1-2 sentences per response
 2. Spell out numbers (say 'twenty-three' not '23')
 3. No special characters, bullets, or formatting
 4. Sound natural and friendly"""
 
-# --- Gemini API Initialization ---
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY:
-    raise ValueError("GOOGLE_API_KEY environment variable not set.")
-genai.configure(api_key=GOOGLE_API_KEY)
+# --- OPTIMIZED: Generation config for faster responses (mapped to Groq params) ---
+# Note: Groq's API might not support all specific parameters like top_k directly,
+# but it supports temperature, top_p, and max_tokens.
+generation_params = {
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "max_tokens": 100, # Shorter responses for voice
+}
 
-# --- OPTIMIZED: Generation config for faster responses ---
-generation_config = genai.GenerationConfig(
-    temperature=0.7,
-    top_p=0.9,
-    top_k=40,
-    max_output_tokens=100,  # Shorter responses for voice
-    candidate_count=1,
-)
+# --- REMOVED: Safety settings (Groq doesn't expose these directly via API params,
+# but their models have inherent safety training) ---
 
-# --- ADDED: Safety settings to prevent false positives ---
-safety_settings = [
-    {
-        "category": "HARM_CATEGORY_HARASSMENT",
-        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-    },
-    {
-        "category": "HARM_CATEGORY_HATE_SPEECH",
-        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-    },
-    {
-        "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-    },
-    {
-        "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-    }
-]
+# --- NEW: Groq LLM Client Class ---
+class GroqLLMClient:
+    """
+    Client to interact with Groq's LLaMA API.
+    Handles chat history and streaming responses.
+    """
+    def __init__(self, model_name: str, system_prompt: str, http_session: aiohttp.ClientSession, api_key: str):
+        self.model_name = model_name
+        self.http_session = http_session
+        self.api_key = api_key
+        self.history = [{"role": "system", "content": system_prompt}]
+        self.headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+        self.api_endpoint = "https://api.groq.com/openai/v1/chat/completions"
 
-# --- OPTIMIZED: Regular model with generation config and safety settings ---
-model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",  # More stable than 2.5-flash
-    system_instruction=SYSTEM_PROMPT,
-    generation_config=generation_config,
-    safety_settings=safety_settings
-)
+    def add_message(self, role: str, content: str):
+        self.history.append({"role": role, "content": content})
+
+    def get_messages(self):
+        return self.history
+
+    async def stream_chat_completions(self, user_prompt: str, gen_params: dict):
+        """
+        Sends a chat completion request to the Groq API and streams the response.
+        """
+        # Add user's latest message to history for this turn
+        self.add_message("user", user_prompt)
+        
+        payload = {
+            "model": self.model_name,
+            "messages": self.get_messages(),
+            "stream": True,
+            **gen_params # Unpack generation parameters
+        }
+
+        full_assistant_response = ""
+        try:
+            async with self.http_session.post(
+                self.api_endpoint,
+                headers=self.headers,
+                json=payload,
+                timeout=6.0 # Reduced timeout for faster failure detection
+            ) as response:
+                response.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
+
+                async for chunk_bytes in response.content.iter_any():
+                    chunk_str = chunk_bytes.decode('utf-8')
+                    for line in chunk_str.splitlines():
+                        if line.startswith("data: "):
+                            data = line[len("data: "):].strip()
+                            if data == "[DONE]":
+                                break # End of stream
+                            try:
+                                chunk_data = json.loads(data)
+                                if chunk_data.get("choices"):
+                                    delta = chunk_data["choices"][0].get("delta", {})
+                                    text = delta.get("content", "")
+                                    finish_reason = chunk_data["choices"][0].get("finish_reason")
+                                    
+                                    full_assistant_response += text # Build full response for history
+
+                                    # Yield a simplified chunk object for consistency with original structure
+                                    class LLMChunk:
+                                        def __init__(self, text_content="", finish_reason_code=None):
+                                            self.text = text_content
+                                            # Groq's response structure is similar to OpenAI, no 'candidates' object but finish_reason in choices
+                                            # We'll adapt it to match the previous structure for easier integration.
+                                            self.candidates = [type('obj', (object,), {'finish_reason': finish_reason_code})()] if finish_reason_code else []
+
+                                    yield LLMChunk(text, finish_reason)
+                            except json.JSONDecodeError:
+                                print(f"Warning: Could not decode JSON from chunk: {data}")
+                                continue
+        except aiohttp.ClientError as e:
+            print(f"Groq API Client Error for {self.model_name}: {e}")
+            raise
+        except asyncio.TimeoutError:
+            print(f"Groq API Timeout for {self.model_name}.")
+            raise
+        
+        # Add assistant's full response to history after completion
+        self.add_message("assistant", full_assistant_response)
 
 # --- OPTIMIZED: HTTP session for connection pooling ---
 http_session = None
@@ -102,16 +163,30 @@ async def create_http_session():
     session = aiohttp.ClientSession(connector=connector)
     return session
 
-# Store active chat sessions
-sessions: dict[str, any] = {}
+# Store active chat sessions (now GroqLLMClient instances)
+sessions: dict[str, GroqLLMClient] = {}
+
+# Global Groq Client (initialized in lifespan)
+groq_client_instance: GroqLLMClient = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan event handler (replaces deprecated startup/shutdown events)"""
     # Startup
-    global http_session
+    global http_session, groq_client_instance
     http_session = await create_http_session()
     print("✅ HTTP session initialized")
+    
+    # Initialize the global Groq client instance
+    # Each WebSocket session will get its own history via a new GroqLLMClient instance
+    # that uses this shared http_session.
+    # We create a placeholder client here that will be used to initialize per-call sessions
+    # (or could be used if you wanted a single shared history across calls - not recommended for voice)
+    
+    # NOTE: The GroqLLMClient manages its own history.
+    # So, we don't need a "global" groq_client_instance that holds history.
+    # Instead, each call_sid will create its own GroqLLMClient in websocket_endpoint.
+    # We still need the http_session to be global.
     
     yield
     
@@ -123,9 +198,10 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app with lifespan
 app = FastAPI(lifespan=lifespan)
 
-async def gemini_response_streaming(chat_session, user_prompt, websocket):
+# RENAMED: gemini_response_streaming -> groq_response_streaming
+async def groq_response_streaming(groq_chat_client: GroqLLMClient, user_prompt: str, websocket: WebSocket):
     """
-    OPTIMIZED: Streaming with intelligent buffering for better performance.
+    Streaming with intelligent buffering for better performance using Groq.
     Buffers chunks until we have meaningful content or sentence boundaries.
     """
     start_api = time.time()
@@ -134,9 +210,8 @@ async def gemini_response_streaming(chat_session, user_prompt, websocket):
     buffer_size = 20  # Minimum characters before sending
     
     try:
-        # Send message to Gemini API
         response_stream = await asyncio.wait_for(
-            chat_session.send_message_async(user_prompt, stream=True),
+            groq_chat_client.stream_chat_completions(user_prompt, generation_params),
             timeout=6.0  # Reduced timeout for faster failure detection
         )
         
@@ -181,25 +256,25 @@ async def gemini_response_streaming(chat_session, user_prompt, websocket):
                     buffer = ""
                     
             elif chunk.candidates and chunk.candidates[0].finish_reason:
-                # Handle safety blocks and other finish reasons
+                # Groq's finish reasons are similar to OpenAI's: 'stop', 'length', 'tool_calls', 'content_filter'
                 finish_reason = chunk.candidates[0].finish_reason
                 
-                if finish_reason == 2:  # SAFETY
+                # Groq/Llama models have built-in safety, but if a content filter is triggered:
+                if finish_reason == 'content_filter':
                     error_message = "I'm sorry, I can't respond to that right now. Could you try rephrasing your question?"
-                elif finish_reason == 3:  # RECITATION
-                    error_message = "I apologize, but I need to avoid that response. Could you ask something else?"
-                elif finish_reason == 4:  # OTHER
-                    error_message = "I'm having trouble with that request. Could you try again?"
-                else:
+                elif finish_reason == 'length':
+                    # This means max_tokens was hit. The response is complete up to that point.
+                    pass # Don't error out, just proceed to send remaining buffer and finish signal
+                elif finish_reason == 'stop':
+                    pass # Normal completion, proceed
+                else: # Any other unexpected finish reason
                     error_message = "I encountered an issue. Please try again."
-                
-                await websocket.send_text(json.dumps({
-                    "type": "text",
-                    "token": error_message,
-                    "last": True
-                }))
-                
-                return error_message, time.time() - start_api
+                    await websocket.send_text(json.dumps({
+                        "type": "text",
+                        "token": error_message,
+                        "last": True
+                    }))
+                    return error_message, time.time() - start_api
 
         # Send any remaining buffer
         if buffer:
@@ -217,7 +292,7 @@ async def gemini_response_streaming(chat_session, user_prompt, websocket):
         }))
 
     except asyncio.TimeoutError:
-        print("⚠️ Gemini API timeout (6s)")
+        print("⚠️ Groq API timeout (6s)")
         error_message = "I'm having trouble right now. Could you try again?"
         await websocket.send_text(json.dumps({
             "type": "text",
@@ -227,7 +302,7 @@ async def gemini_response_streaming(chat_session, user_prompt, websocket):
         return error_message, time.time() - start_api
         
     except Exception as e:
-        print(f"💥 Gemini API error: {e}")
+        print(f"💥 Groq API error: {e}")
         error_message = "I encountered an error. Please try again."
         await websocket.send_text(json.dumps({
             "type": "text",
@@ -293,8 +368,14 @@ async def websocket_endpoint(websocket: WebSocket):
 
             if message.get("type") == "setup":
                 call_sid = message["callSid"]
-                sessions[call_sid] = model.start_chat(history=[])
-                print(f"✅ Setup for call: {call_sid}")
+                # Initialize a new GroqLLMClient instance for each call_sid
+                sessions[call_sid] = GroqLLMClient(
+                    model_name=GROQ_MODEL_NAME,
+                    system_prompt=SYSTEM_PROMPT,
+                    http_session=http_session, # Use the shared http_session
+                    api_key=GROQ_API_KEY
+                )
+                print(f"✅ Setup for call: {call_sid} using Groq Llama: {GROQ_MODEL_NAME}")
                 continue
 
             if message.get("type") != "prompt" or not call_sid:
@@ -307,8 +388,8 @@ async def websocket_endpoint(websocket: WebSocket):
             # Start timing the full turnaround
             turnaround_start = time.time()
 
-            # Gemini API call with streaming
-            api_response_full_text, api_time = await gemini_response_streaming(
+            # Groq API call with streaming
+            api_response_full_text, api_time = await groq_response_streaming(
                 sessions[call_sid], user_prompt, websocket
             )
 
@@ -339,12 +420,15 @@ async def health_check():
     return {
         "status": "healthy", 
         "domain": DOMAIN,
+        "llm_provider": "Groq",
+        "llm_model": GROQ_MODEL_NAME,
         "optimizations": [
             "connection_pooling", 
             "smart_buffering",
             "fast_tts_config",
             "reduced_timeouts",
-            "aggressive_vad"
+            "aggressive_vad",
+            "groq_inference" # New optimization
         ]
     }
 
@@ -352,5 +436,6 @@ if __name__ == "__main__":
     print(f"🚀 Starting voice assistant on port {PORT}")
     print(f"🔗 WebSocket URL: {WS_URL}")
     print(f"🌐 Domain: {DOMAIN}")
+    print(f"Using Groq model: {GROQ_MODEL_NAME}")
     
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, workers=1)
