@@ -318,7 +318,7 @@ async def gemini_response_streaming(chat_session, user_prompt, websocket):
 
 @app.post("/twiml")
 async def twiml_endpoint():
-    """OPTIMIZED: Return TwiML with better TTS configuration for speed"""
+    """OPTIMIZED: Return TwiML with shorter VAD settings for more responsive detection"""
     twiml_start = time.time()
     print(f"⏱️  [TWIML] Endpoint called")
     
@@ -336,6 +336,12 @@ async def twiml_endpoint():
       elevenlabsStability="0.5"
       elevenlabsSimilarity="0.8"
       elevenlabsOptimizeStreamingLatency="4"
+      vadSilenceMs="500"
+      vadThreshold="0.3"
+      vadMode="aggressive"
+      vadDebounceMs="100"
+      vadPreambleMs="300"
+      vadPostambleMs="200"
     />
   </Connect>
 </Response>"""
@@ -475,7 +481,8 @@ async def health_check():
             "connection_pooling", 
             "smart_buffering",
             "fast_tts_config",
-            "reduced_timeouts"
+            "reduced_timeouts",
+            "aggressive_vad"
         ]
     }
     
@@ -488,7 +495,7 @@ if __name__ == "__main__":
     print(f"🚀 Starting optimized voice assistant on port {PORT}")
     print(f"🔗 WebSocket URL for Twilio: {WS_URL}")
     print(f"🌐 Detected platform domain: {DOMAIN}")
-    print(f"⚡ Optimizations: Connection Pooling, Smart Buffering, Fast TTS")
+    print(f"⚡ Optimizations: Connection Pooling, Smart Buffering, Fast TTS, Aggressive VAD")
     
     # --- OPTIMIZED: Adjusted worker count for voice workload ---
     server_start = time.time()
