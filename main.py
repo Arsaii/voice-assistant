@@ -285,48 +285,64 @@ async def websocket_endpoint(websocket: WebSocket):
         call_sid = None
 
         while True:
-            # Receive and parse message
-            raw = await websocket.receive_text()
-            message = json.loads(raw)
+            try:
+                # Receive and parse message
+                raw = await websocket.receive_text()
+                print(f"📨 Received raw message: {raw[:200]}...")
+                
+                message = json.loads(raw)
+                print(f"📋 Parsed message type: {message.get('type')}")
 
-            # Print debug messages but don't process them
-            if message.get("type") in ["info", "debug"]:
-                if message.get("name") in ["roundTripDelayMs", "tokensPlayed"]:
-                    print(f"[{call_sid}] [{message.get('name', 'DEBUG')}] {message.get('value', message)}")
+                # Print debug messages but don't process them
+                if message.get("type") in ["info", "debug"]:
+                    if message.get("name") in ["roundTripDelayMs", "tokensPlayed"]:
+                        print(f"[{call_sid}] [{message.get('name', 'DEBUG')}] {message.get('value', message)}")
+                    continue
+
+                if message.get("type") == "setup":
+                    call_sid = message["callSid"]
+                    sessions[call_sid] = []  # Initialize empty chat history
+                    print(f"✅ Setup for call: {call_sid}")
+                    continue
+
+                if message.get("type") != "prompt" or not call_sid:
+                    print(f"⏭️ Skipping message type: {message.get('type')}, call_sid: {call_sid}")
+                    continue
+
+                # Process user prompt
+                user_prompt = message["voicePrompt"]
+                print(f"🎤 User: {user_prompt}")
+                
+                # Start timing the full turnaround
+                turnaround_start = time.time()
+
+                # Groq API call with streaming
+                api_response_full_text, api_time = await groq_response_streaming(
+                    sessions[call_sid], user_prompt, websocket
+                )
+
+                # Calculate total turnaround time
+                total_time = time.time() - turnaround_start
+                
+                # Only log performance summary
+                print(f"🚀 Total: {total_time*1000:.0f}ms | API: {api_time*1000:.0f}ms")
+
+                # Performance analysis
+                if total_time > 2.0:
+                    print(f"⚠️ SLOW: {total_time:.1f}s")
+                elif total_time < 0.8:
+                    print(f"⚡ FAST: {total_time:.1f}s")
+                    
+            except json.JSONDecodeError as e:
+                print(f"💥 JSON decode error: {e}")
+                print(f"🔍 Raw message that failed: {raw}")
                 continue
-
-            if message.get("type") == "setup":
-                call_sid = message["callSid"]
-                sessions[call_sid] = []  # Initialize empty chat history
-                print(f"✅ Setup for call: {call_sid}")
+                
+            except Exception as e:
+                print(f"💥 Error in message processing: {e}")
+                import traceback
+                print(f"🔍 Traceback: {traceback.format_exc()}")
                 continue
-
-            if message.get("type") != "prompt" or not call_sid:
-                continue
-
-            # Process user prompt
-            user_prompt = message["voicePrompt"]
-            print(f"🎤 User: {user_prompt}")
-            
-            # Start timing the full turnaround
-            turnaround_start = time.time()
-
-            # Groq API call with streaming
-            api_response_full_text, api_time = await groq_response_streaming(
-                sessions[call_sid], user_prompt, websocket
-            )
-
-            # Calculate total turnaround time
-            total_time = time.time() - turnaround_start
-            
-            # Only log performance summary
-            print(f"🚀 Total: {total_time*1000:.0f}ms | API: {api_time*1000:.0f}ms")
-
-            # Performance analysis
-            if total_time > 2.0:
-                print(f"⚠️ SLOW: {total_time:.1f}s")
-            elif total_time < 0.8:
-                print(f"⚡ FAST: {total_time:.1f}s")
 
     except WebSocketDisconnect:
         print(f"🔌 WebSocket disconnected normally")
@@ -336,6 +352,8 @@ async def websocket_endpoint(websocket: WebSocket):
         
     except Exception as e:
         print(f"💥 WebSocket error: {e}")
+        import traceback
+        print(f"🔍 Full WebSocket traceback: {traceback.format_exc()}")
         if call_sid and call_sid in sessions:
             sessions.pop(call_sid, None)
 
