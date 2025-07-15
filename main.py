@@ -213,7 +213,7 @@ async def twiml_endpoint():
       url="{WS_URL}"
       welcomeGreeting="{WELCOME_GREETING}"
       ttsProvider="ElevenLabs"
-      voice="FGY2WhTYpPnrIDTdsKH5"
+      voice="JH302OKVzGGJc47f08ex"
       language="de"
       debug="debugging speaker-events tokens-played"
       elevenlabsTextNormalization="off"
