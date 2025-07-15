@@ -18,6 +18,7 @@ load_dotenv()
 
 # --- Configuration ---
 PORT = int(os.getenv("PORT", "8080"))
+DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "en")  # Can be set to "de", "fr", "es", etc.
 
 # Robust domain detection: Railway, ngrok or localhost fallback
 DOMAIN = os.getenv("RAILWAY_STATIC_URL") or os.getenv("NGROK_URL")
@@ -32,17 +33,39 @@ WS_URL = (
     else f"ws://{DOMAIN}/ws"
 )
 
-WELCOME_GREETING = (
-    "Hello, how can I help?"
-)
+# Language-specific welcome greetings
+WELCOME_GREETINGS = {
+    "en": "Hello, how can I help?",
+    "de": "Hallo, wie kann ich Ihnen helfen?",
+    "es": "Hola, ¿cómo puedo ayudarte?",
+    "fr": "Bonjour, comment puis-je vous aider?",
+    "it": "Ciao, come posso aiutarti?",
+    "pt": "Olá, como posso ajudar?",
+    "nl": "Hallo, hoe kan ik helpen?"
+}
 
-# --- OPTIMIZED: Shorter, more focused system prompt for voice ---
-SYSTEM_PROMPT = """You are a helpful voice assistant. Keep responses conversational and concise since this is a phone call. 
+WELCOME_GREETING = WELCOME_GREETINGS.get(DEFAULT_LANGUAGE, WELCOME_GREETINGS["en"])
+
+# --- ADAPTIVE: Multi-language system prompt ---
+SYSTEM_PROMPT = """You are a helpful multilingual voice assistant. Always respond in the same language the user speaks to you in. Keep responses conversational and concise since this is a phone call.
+
 Rules:
-1. Be direct and brief - aim for 1-2 sentences per response
-2. Spell out numbers (say 'twenty-three' not '23')
-3. No special characters, bullets, or formatting
-4. Sound natural and friendly"""
+1. DETECT the user's language and respond in that SAME language
+2. Be direct and brief - aim for 1-2 sentences per response  
+3. Spell out numbers in the target language (e.g., "twenty-three" in English, "dreiundzwanzig" in German, "veintitrés" in Spanish)
+4. No special characters, bullets, or formatting
+5. Sound natural and friendly in whatever language you're using
+6. If you're unsure of the language, ask politely in the language you think they're using
+
+Language examples:
+- English: "I can help you with that."
+- German: "Ich kann Ihnen dabei helfen."
+- Spanish: "Puedo ayudarte con eso."
+- French: "Je peux vous aider avec ça."
+- Italian: "Posso aiutarti con quello."
+- Portuguese: "Posso ajudá-lo com isso."
+- Dutch: "Ik kan je daarmee helpen."
+"""
 
 # --- Groq API Initialization ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -213,6 +236,7 @@ async def twiml_endpoint():
       welcomeGreeting="{WELCOME_GREETING}"
       ttsProvider="ElevenLabs"
       voice="FGY2WhTYpPnrIDTdsKH5"
+      language="{DEFAULT_LANGUAGE}"
       debug="debugging speaker-events tokens-played"
       elevenlabsTextNormalization="off"
       elevenlabsModelId="eleven_turbo_v2_5"
@@ -346,7 +370,9 @@ if __name__ == "__main__":
     print(f"✅ Environment check:")
     print(f"  - GROQ_API_KEY: {'Set' if GROQ_API_KEY else 'NOT SET'}")
     print(f"  - GROQ_MODEL_NAME: {os.getenv('GROQ_MODEL_NAME', 'Not set (using default)')}")
+    print(f"  - DEFAULT_LANGUAGE: {DEFAULT_LANGUAGE}")
     print(f"  - RAILWAY_STATIC_URL: {os.getenv('RAILWAY_STATIC_URL', 'Not set')}")
     print(f"  - NGROK_URL: {os.getenv('NGROK_URL', 'Not set')}")
+    print(f"  - Welcome Greeting: {WELCOME_GREETING}")
     
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, workers=1)
