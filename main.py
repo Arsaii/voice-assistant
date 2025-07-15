@@ -33,17 +33,16 @@ WS_URL = (
 )
 
 WELCOME_GREETING = (
-    "Hallo, wie kann ich Ihnen helfen?"
+    "Hello, how can I help?"
 )
 
-# --- OPTIMIZED: German system prompt for voice ---
-SYSTEM_PROMPT = """Du bist ein hilfsreicher Sprachassistent auf Deutsch. Halte Antworten gesprächig und prägnant, da dies ein Telefonanruf ist.
-Regeln:
-1. Sei direkt und kurz - strebe 1-2 Sätze pro Antwort an
-2. Buchstabiere Zahlen aus (sage 'dreiundzwanzig' nicht '23')
-3. Keine Sonderzeichen, Aufzählungspunkte oder Formatierungen
-4. Klinge natürlich und freundlich
-5. Antworte immer auf Deutsch"""
+# --- OPTIMIZED: Shorter, more focused system prompt for voice ---
+SYSTEM_PROMPT = """You are a helpful voice assistant. Keep responses conversational and concise since this is a phone call. 
+Rules:
+1. Be direct and brief - aim for 1-2 sentences per response
+2. Spell out numbers (say 'twenty-three' not '23')
+3. No special characters, bullets, or formatting
+4. Sound natural and friendly"""
 
 # --- Groq API Initialization ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -213,8 +212,7 @@ async def twiml_endpoint():
       url="{WS_URL}"
       welcomeGreeting="{WELCOME_GREETING}"
       ttsProvider="ElevenLabs"
-      voice="JH302OKVzGGJc47f08ex"
-      language="de"
+      voice="FGY2WhTYpPnrIDTdsKH5"
       debug="debugging speaker-events tokens-played"
       elevenlabsTextNormalization="off"
       elevenlabsModelId="eleven_turbo_v2_5"
