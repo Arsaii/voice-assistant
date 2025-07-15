@@ -18,6 +18,7 @@ load_dotenv()
 
 # --- Configuration ---
 PORT = int(os.getenv("PORT", "8080"))
+DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "en")  # Can be set to "de", "fr", "es", etc.
 
 # Robust domain detection: Railway, ngrok or localhost fallback
 DOMAIN = os.getenv("RAILWAY_STATIC_URL") or os.getenv("NGROK_URL")
@@ -32,17 +33,39 @@ WS_URL = (
     else f"ws://{DOMAIN}/ws"
 )
 
-WELCOME_GREETING = (
-    "Hello, how can I help?"
-)
+# Language-specific welcome greetings
+WELCOME_GREETINGS = {
+    "en": "Hello, how can I help?",
+    "de": "Hallo, wie kann ich Ihnen helfen?",
+    "es": "Hola, ¿cómo puedo ayudarte?",
+    "fr": "Bonjour, comment puis-je vous aider?",
+    "it": "Ciao, come posso aiutarti?",
+    "pt": "Olá, como posso ajudar?",
+    "nl": "Hallo, hoe kan ik helpen?"
+}
 
-# --- OPTIMIZED: Shorter, more focused system prompt for voice ---
-SYSTEM_PROMPT = """You are a helpful voice assistant. Keep responses conversational and concise since this is a phone call. 
+WELCOME_GREETING = WELCOME_GREETINGS.get(DEFAULT_LANGUAGE, WELCOME_GREETINGS["en"])
+
+# --- ADAPTIVE: Multi-language system prompt ---
+SYSTEM_PROMPT = """You are a helpful multilingual voice assistant. Always respond in the same language the user speaks to you in. Keep responses conversational and concise since this is a phone call.
+
 Rules:
-1. Be direct and brief - aim for 1-2 sentences per response
-2. Spell out numbers (say 'twenty-three' not '23')
-3. No special characters, bullets, or formatting
-4. Sound natural and friendly"""
+1. DETECT the user's language and respond in that SAME language
+2. Be direct and brief - aim for 1-2 sentences per response  
+3. Spell out numbers in the target language (e.g., "twenty-three" in English, "dreiundzwanzig" in German, "veintitrés" in Spanish)
+4. No special characters, bullets, or formatting
+5. Sound natural and friendly in whatever language you're using
+6. If you're unsure of the language, ask politely in the language you think they're using
+
+Language examples:
+- English: "I can help you with that."
+- German: "Ich kann Ihnen dabei helfen."
+- Spanish: "Puedo ayudarte con eso."
+- French: "Je peux vous aider avec ça."
+- Italian: "Posso aiutarti con quello."
+- Portuguese: "Posso ajudá-lo com isso."
+- Dutch: "Ik kan je daarmee helpen."
+"""
 
 # --- Groq API Initialization ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -71,8 +94,8 @@ async def create_http_session():
     session = aiohttp.ClientSession(connector=connector)
     return session
 
-# Store active chat sessions with conversation history
-sessions: dict[str, list] = {}
+# Store active chat sessions with conversation history and timing data
+sessions: dict[str, dict] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -204,6 +227,8 @@ async def twiml_endpoint():
         print(f"🌐 Domain: {DOMAIN}")
         print(f"🔌 WebSocket URL: {WS_URL}")
         print(f"🤖 Model: {CHAT_MODEL}")
+        print(f"🌍 Language: {DEFAULT_LANGUAGE}")
+        print(f"👋 Welcome: {WELCOME_GREETING}")
         
         xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -213,6 +238,7 @@ async def twiml_endpoint():
       welcomeGreeting="{WELCOME_GREETING}"
       ttsProvider="ElevenLabs"
       voice="FGY2WhTYpPnrIDTdsKH5"
+      language="{DEFAULT_LANGUAGE}"
       debug="debugging speaker-events tokens-played"
       elevenlabsTextNormalization="off"
       elevenlabsModelId="eleven_turbo_v2_5"
@@ -233,10 +259,14 @@ async def twiml_endpoint():
 </Response>"""
         
         print(f"✅ TwiML response generated successfully")
+        print(f"📄 XML Preview: {xml_response[:200]}...")
         return Response(content=xml_response, media_type="text/xml")
         
     except Exception as e:
         print(f"💥 TwiML endpoint error: {e}")
+        import traceback
+        print(f"🔍 Full traceback: {traceback.format_exc()}")
+        
         # Return a simple fallback TwiML
         fallback_xml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -255,57 +285,84 @@ async def websocket_endpoint(websocket: WebSocket):
         call_sid = None
 
         while True:
-            # Receive and parse message
-            raw = await websocket.receive_text()
-            message = json.loads(raw)
+            try:
+                # Receive and parse message
+                raw = await websocket.receive_text()
+                print(f"📨 Received raw message: {raw[:200]}...")
+                
+                message = json.loads(raw)
+                print(f"📋 Parsed message type: {message.get('type')}")
 
-            # Print debug messages but don't process them
-            if message.get("type") in ["info", "debug"]:
-                if message.get("name") in ["roundTripDelayMs", "tokensPlayed"]:
-                    print(f"[{call_sid}] [{message.get('name', 'DEBUG')}] {message.get('value', message)}")
+                # Print debug messages but don't process them
+                if message.get("type") in ["info", "debug"]:
+                    if message.get("name") in ["roundTripDelayMs", "tokensPlayed"]:
+                        print(f"[{call_sid}] [{message.get('name', 'DEBUG')}] {message.get('value', message)}")
+                    continue
+
+                if message.get("type") == "setup":
+                    call_sid = message["callSid"]
+                    sessions[call_sid] = []  # Initialize empty chat history
+                    print(f"✅ Setup for call: {call_sid}")
+                    continue
+
+                if message.get("type") != "prompt" or not call_sid:
+                    print(f"⏭️ Skipping message type: {message.get('type')}, call_sid: {call_sid}")
+                    continue
+
+                # Process user prompt
+                user_prompt = message["voicePrompt"]
+                print(f"🎤 User: {user_prompt}")
+                
+                # Start timing the full turnaround
+                turnaround_start = time.time()
+
+                # Groq API call with streaming
+                api_response_full_text, api_time = await groq_response_streaming(
+                    sessions[call_sid], user_prompt, websocket
+                )
+
+                # Calculate total turnaround time
+                total_time = time.time() - turnaround_start
+                
+                # Only log performance summary
+                print(f"🚀 Total: {total_time*1000:.0f}ms | API: {api_time*1000:.0f}ms")
+
+                # Performance analysis
+                if total_time > 2.0:
+                    print(f"⚠️ SLOW: {total_time:.1f}s")
+                elif total_time < 0.8:
+                    print(f"⚡ FAST: {total_time:.1f}s")
+                    
+            except json.JSONDecodeError as e:
+                print(f"💥 JSON decode error: {e}")
+                print(f"🔍 Raw message that failed: {raw}")
                 continue
-
-            if message.get("type") == "setup":
-                call_sid = message["callSid"]
-                sessions[call_sid] = []  # Initialize empty chat history
-                print(f"✅ Setup for call: {call_sid}")
+                
+            except Exception as e:
+                print(f"💥 Error in message processing: {e}")
+                import traceback
+                print(f"🔍 Traceback: {traceback.format_exc()}")
                 continue
-
-            if message.get("type") != "prompt" or not call_sid:
-                continue
-
-            # Process user prompt
-            user_prompt = message["voicePrompt"]
-            print(f"🎤 User: {user_prompt}")
-            
-            # Start timing the full turnaround
-            turnaround_start = time.time()
-
-            # Groq API call with streaming
-            api_response_full_text, api_time = await groq_response_streaming(
-                sessions[call_sid], user_prompt, websocket
-            )
-
-            # Calculate total turnaround time
-            total_time = time.time() - turnaround_start
-            
-            # Only log performance summary
-            print(f"🚀 Total: {total_time*1000:.0f}ms | API: {api_time*1000:.0f}ms")
-
-            # Performance analysis
-            if total_time > 2.0:
-                print(f"⚠️ SLOW: {total_time:.1f}s")
-            elif total_time < 0.8:
-                print(f"⚡ FAST: {total_time:.1f}s")
 
     except WebSocketDisconnect:
         print(f"🔌 WebSocket disconnected normally")
         if call_sid and call_sid in sessions:
+            # Print final timing summary
+            timing = sessions[call_sid]["timing"]
+            if timing["last_response_complete"] and timing["setup_time"]:
+                total_call_time = timing["last_response_complete"] - timing["setup_time"]
+                print(f"📊 CALL SUMMARY for {call_sid}:")
+                print(f"  🕒 Total call duration: {total_call_time:.1f}s")
+                print(f"  🎯 Setup time: {timing['setup_time']}")
+                print(f"  🔚 Last response: {timing['last_response_complete']}")
+            
             sessions.pop(call_sid, None)
             print(f"🔌 Disconnected: {call_sid}")
         
     except Exception as e:
         print(f"💥 WebSocket error: {e}")
+        import traceback
+        print(f"🔍 Full WebSocket traceback: {traceback.format_exc()}")
         if call_sid and call_sid in sessions:
             sessions.pop(call_sid, None)
 
@@ -321,12 +378,23 @@ async def root():
         }
     }
 
+@app.get("/test-ws")
+async def test_websocket():
+    """Test if WebSocket endpoint is accessible"""
+    return {
+        "websocket_url": WS_URL,
+        "status": "WebSocket endpoint should be available at /ws",
+        "test_url": f"wss://{DOMAIN}/ws"
+    }
+
 @app.get("/health")
 async def health_check():
     return {
         "status": "healthy", 
         "domain": DOMAIN,
+        "websocket_url": WS_URL,
         "model": CHAT_MODEL,
+        "language": DEFAULT_LANGUAGE,
         "optimizations": [
             "connection_pooling", 
             "smart_buffering",
@@ -346,7 +414,9 @@ if __name__ == "__main__":
     print(f"✅ Environment check:")
     print(f"  - GROQ_API_KEY: {'Set' if GROQ_API_KEY else 'NOT SET'}")
     print(f"  - GROQ_MODEL_NAME: {os.getenv('GROQ_MODEL_NAME', 'Not set (using default)')}")
+    print(f"  - DEFAULT_LANGUAGE: {DEFAULT_LANGUAGE}")
     print(f"  - RAILWAY_STATIC_URL: {os.getenv('RAILWAY_STATIC_URL', 'Not set')}")
     print(f"  - NGROK_URL: {os.getenv('NGROK_URL', 'Not set')}")
+    print(f"  - Welcome Greeting: {WELCOME_GREETING}")
     
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, workers=1)
