@@ -227,6 +227,8 @@ async def twiml_endpoint():
         print(f"🌐 Domain: {DOMAIN}")
         print(f"🔌 WebSocket URL: {WS_URL}")
         print(f"🤖 Model: {CHAT_MODEL}")
+        print(f"🌍 Language: {DEFAULT_LANGUAGE}")
+        print(f"👋 Welcome: {WELCOME_GREETING}")
         
         xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -257,10 +259,14 @@ async def twiml_endpoint():
 </Response>"""
         
         print(f"✅ TwiML response generated successfully")
+        print(f"📄 XML Preview: {xml_response[:200]}...")
         return Response(content=xml_response, media_type="text/xml")
         
     except Exception as e:
         print(f"💥 TwiML endpoint error: {e}")
+        import traceback
+        print(f"🔍 Full traceback: {traceback.format_exc()}")
+        
         # Return a simple fallback TwiML
         fallback_xml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
