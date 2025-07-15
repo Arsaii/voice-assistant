@@ -52,7 +52,7 @@ if not GROQ_API_KEY:
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # --- Chat configuration ---
-CHAT_MODEL = os.getenv("GROQ_MODEL_NAME")  # Use environment variable
+CHAT_MODEL = os.getenv("GROQ_MODEL_NAME", "llama-3.1-70b-versatile")  # Use environment variable with fallback
 MAX_TOKENS = 100
 TEMPERATURE = 0.7
 
@@ -199,7 +199,13 @@ async def groq_response_streaming(chat_history, user_prompt, websocket):
 @app.post("/twiml")
 async def twiml_endpoint():
     """Return TwiML with shorter VAD settings for more responsive detection"""
-    xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+    try:
+        print(f"🔗 TwiML endpoint called")
+        print(f"🌐 Domain: {DOMAIN}")
+        print(f"🔌 WebSocket URL: {WS_URL}")
+        print(f"🤖 Model: {CHAT_MODEL}")
+        
+        xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
     <ConversationRelay
@@ -225,8 +231,18 @@ async def twiml_endpoint():
     />
   </Connect>
 </Response>"""
-    
-    return Response(content=xml_response, media_type="text/xml")
+        
+        print(f"✅ TwiML response generated successfully")
+        return Response(content=xml_response, media_type="text/xml")
+        
+    except Exception as e:
+        print(f"💥 TwiML endpoint error: {e}")
+        # Return a simple fallback TwiML
+        fallback_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>Sorry, there was an error setting up the call. Please try again.</Say>
+</Response>"""
+        return Response(content=fallback_xml, media_type="text/xml")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -289,6 +305,18 @@ async def websocket_endpoint(websocket: WebSocket):
         if call_sid and call_sid in sessions:
             sessions.pop(call_sid, None)
 
+@app.get("/")
+async def root():
+    """Simple root endpoint for testing"""
+    return {
+        "message": "Voice Assistant API is running",
+        "endpoints": {
+            "twiml": "/twiml",
+            "websocket": "/ws",
+            "health": "/health"
+        }
+    }
+
 @app.get("/health")
 async def health_check():
     return {
@@ -309,5 +337,12 @@ if __name__ == "__main__":
     print(f"🔗 WebSocket URL: {WS_URL}")
     print(f"🌐 Domain: {DOMAIN}")
     print(f"🤖 Model: {CHAT_MODEL}")
+    
+    # Verify environment variables
+    print(f"✅ Environment check:")
+    print(f"  - GROQ_API_KEY: {'Set' if GROQ_API_KEY else 'NOT SET'}")
+    print(f"  - GROQ_MODEL_NAME: {os.getenv('GROQ_MODEL_NAME', 'Not set (using default)')}")
+    print(f"  - RAILWAY_STATIC_URL: {os.getenv('RAILWAY_STATIC_URL', 'Not set')}")
+    print(f"  - NGROK_URL: {os.getenv('NGROK_URL', 'Not set')}")
     
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, workers=1)
