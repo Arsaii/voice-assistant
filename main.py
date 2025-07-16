@@ -10,17 +10,14 @@ from fastapi.responses import Response
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
-# --- REMOVED: Import Twilio TwiML classes (ConversationRelay not available in Python library) ---
-# We'll generate the XML manually since ConversationRelay is newer than the Python library
-
 # Load environment variables from .env file
 load_dotenv()
 
 # --- Configuration ---
 PORT = int(os.getenv("PORT", "8080"))
 
-# Robust domain detection: Railway, ngrok or localhost fallback
-DOMAIN = os.getenv("RAILWAY_STATIC_URL") or os.getenv("NGROK_URL")
+# Robust domain detection: Railway or localhost fallback
+DOMAIN = os.getenv("RAILWAY_STATIC_URL")
 if not DOMAIN:
     DOMAIN = f"localhost:{PORT}"
 if DOMAIN.startswith("https://"):
@@ -52,7 +49,7 @@ if not GROQ_API_KEY:
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # --- Chat configuration ---
-CHAT_MODEL = os.getenv("GROQ_MODEL_NAME", "llama-3.1-70b-versatile")  # Use environment variable with fallback
+CHAT_MODEL = os.getenv("GROQ_MODEL_NAME")  # Use environment variable
 MAX_TOKENS = 100
 TEMPERATURE = 0.7
 
@@ -71,8 +68,8 @@ async def create_http_session():
     session = aiohttp.ClientSession(connector=connector)
     return session
 
-# Store active chat sessions with conversation history
-sessions: dict[str, list] = {}
+# Store active chat sessions with conversation history and timing data
+sessions: dict[str, dict] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -198,7 +195,7 @@ async def groq_response_streaming(chat_history, user_prompt, websocket):
 
 @app.post("/twiml")
 async def twiml_endpoint():
-    """Return TwiML with shorter VAD settings for more responsive detection"""
+    """Return TwiML with optimized VAD settings for faster STT"""
     try:
         print(f"🔗 TwiML endpoint called")
         print(f"🌐 Domain: {DOMAIN}")
@@ -220,23 +217,30 @@ async def twiml_endpoint():
       elevenlabsSimilarity="0.8"
       elevenlabsOptimizeStreamingLatency="5"
       elevenlabsRequestTimeoutMs="3000"
-      vadSilenceMs="200"
-      vadThreshold="0.2"
+      vadSilenceMs="150"
+      vadThreshold="0.15"
       vadMode="aggressive"
-      vadDebounceMs="25"
-      vadPreambleMs="100"
-      vadPostambleMs="50"
-      vadMinSpeechMs="150"
-      vadMaxSpeechMs="10000"
+      vadDebounceMs="20"
+      vadPreambleMs="75"
+      vadPostambleMs="25"
+      vadMinSpeechMs="100"
+      vadMaxSpeechMs="8000"
+      speechModel="enhanced"
+      speechProfanityFilter="false"
+      speechPartialResultEvents="true"
     />
   </Connect>
 </Response>"""
         
         print(f"✅ TwiML response generated successfully")
+        print(f"🚀 STT Optimizations: Enhanced model, faster VAD, partial results")
         return Response(content=xml_response, media_type="text/xml")
         
     except Exception as e:
         print(f"💥 TwiML endpoint error: {e}")
+        import traceback
+        print(f"🔍 Full traceback: {traceback.format_exc()}")
+        
         # Return a simple fallback TwiML
         fallback_xml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -246,7 +250,7 @@ async def twiml_endpoint():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint with focused performance logging"""
+    """WebSocket endpoint with comprehensive timing analysis"""
     print(f"🔌 WebSocket connection attempt from {websocket.client}")
     
     try:
@@ -255,57 +259,111 @@ async def websocket_endpoint(websocket: WebSocket):
         call_sid = None
 
         while True:
-            # Receive and parse message
-            raw = await websocket.receive_text()
-            message = json.loads(raw)
+            try:
+                # Receive and parse message
+                raw = await websocket.receive_text()
+                message = json.loads(raw)
 
-            # Print debug messages but don't process them
-            if message.get("type") in ["info", "debug"]:
-                if message.get("name") in ["roundTripDelayMs", "tokensPlayed"]:
-                    print(f"[{call_sid}] [{message.get('name', 'DEBUG')}] {message.get('value', message)}")
+                # Print debug messages but don't process them
+                if message.get("type") in ["info", "debug"]:
+                    if message.get("name") in ["roundTripDelayMs", "tokensPlayed"]:
+                        print(f"[{call_sid}] [{message.get('name', 'DEBUG')}] {message.get('value', message)}")
+                    continue
+
+                if message.get("type") == "setup":
+                    call_sid = message["callSid"]
+                    sessions[call_sid] = {
+                        "chat_history": [],
+                        "timing": {
+                            "setup_time": time.time(),
+                            "last_response_complete": None,
+                            "last_prompt_received": None
+                        }
+                    }
+                    print(f"✅ Setup for call: {call_sid}")
+                    continue
+
+                if message.get("type") != "prompt" or not call_sid:
+                    continue
+
+                # TIMING: Mark when we received the user's prompt (after STT)
+                prompt_received_time = time.time()
+                sessions[call_sid]["timing"]["last_prompt_received"] = prompt_received_time
+                
+                # Calculate time since last response completed (includes STT + VAD time)
+                if sessions[call_sid]["timing"]["last_response_complete"]:
+                    stt_vad_time = prompt_received_time - sessions[call_sid]["timing"]["last_response_complete"]
+                    print(f"🔊 STT + VAD time: {stt_vad_time*1000:.0f}ms")
+                else:
+                    stt_vad_time = prompt_received_time - sessions[call_sid]["timing"]["setup_time"]
+                    print(f"🔊 Initial STT + VAD time: {stt_vad_time*1000:.0f}ms")
+
+                # Process user prompt
+                user_prompt = message["voicePrompt"]
+                print(f"🎤 User: {user_prompt}")
+                
+                # Start timing server processing
+                server_start_time = time.time()
+
+                # Groq API call with streaming
+                api_response_full_text, api_time = await groq_response_streaming(
+                    sessions[call_sid]["chat_history"], user_prompt, websocket
+                )
+
+                # TIMING: Mark response completion
+                response_complete_time = time.time()
+                sessions[call_sid]["timing"]["last_response_complete"] = response_complete_time
+                
+                # Calculate comprehensive timing breakdown
+                total_server_time = response_complete_time - prompt_received_time
+                network_overhead = total_server_time - api_time
+                
+                print(f"📊 COMPREHENSIVE TIMING BREAKDOWN:")
+                print(f"  🔊 STT + VAD: {stt_vad_time*1000:.0f}ms")
+                print(f"  🎯 Server Total: {total_server_time*1000:.0f}ms")
+                print(f"  🧠 AI Processing: {api_time*1000:.0f}ms")
+                print(f"  📡 Network/Overhead: {network_overhead*1000:.0f}ms")
+                print(f"  ⚡ Subtotal (visible): {(stt_vad_time + total_server_time)*1000:.0f}ms")
+                print(f"  ⚠️ + TTS time (~400-800ms) = ~{((stt_vad_time + total_server_time)*1000 + 600):.0f}ms total")
+
+                # Performance analysis
+                total_visible_time = stt_vad_time + total_server_time
+                estimated_total = total_visible_time + 0.6  # Add estimated TTS time
+                
+                if estimated_total > 2.5:
+                    print(f"🐌 SLOW OVERALL: {estimated_total:.1f}s")
+                elif estimated_total < 1.5:
+                    print(f"🚀 FAST OVERALL: {estimated_total:.1f}s")
+                else:
+                    print(f"✅ NORMAL OVERALL: {estimated_total:.1f}s")
+                    
+            except json.JSONDecodeError as e:
+                print(f"💥 JSON decode error: {e}")
                 continue
-
-            if message.get("type") == "setup":
-                call_sid = message["callSid"]
-                sessions[call_sid] = []  # Initialize empty chat history
-                print(f"✅ Setup for call: {call_sid}")
+                
+            except Exception as e:
+                print(f"💥 Error in message processing: {e}")
+                import traceback
+                print(f"🔍 Traceback: {traceback.format_exc()}")
                 continue
-
-            if message.get("type") != "prompt" or not call_sid:
-                continue
-
-            # Process user prompt
-            user_prompt = message["voicePrompt"]
-            print(f"🎤 User: {user_prompt}")
-            
-            # Start timing the full turnaround
-            turnaround_start = time.time()
-
-            # Groq API call with streaming
-            api_response_full_text, api_time = await groq_response_streaming(
-                sessions[call_sid], user_prompt, websocket
-            )
-
-            # Calculate total turnaround time
-            total_time = time.time() - turnaround_start
-            
-            # Only log performance summary
-            print(f"🚀 Total: {total_time*1000:.0f}ms | API: {api_time*1000:.0f}ms")
-
-            # Performance analysis
-            if total_time > 2.0:
-                print(f"⚠️ SLOW: {total_time:.1f}s")
-            elif total_time < 0.8:
-                print(f"⚡ FAST: {total_time:.1f}s")
 
     except WebSocketDisconnect:
         print(f"🔌 WebSocket disconnected normally")
         if call_sid and call_sid in sessions:
+            # Print final timing summary
+            timing = sessions[call_sid]["timing"]
+            if timing["last_response_complete"] and timing["setup_time"]:
+                total_call_time = timing["last_response_complete"] - timing["setup_time"]
+                print(f"📊 CALL SUMMARY for {call_sid}:")
+                print(f"  🕒 Total call duration: {total_call_time:.1f}s")
+            
             sessions.pop(call_sid, None)
             print(f"🔌 Disconnected: {call_sid}")
         
     except Exception as e:
         print(f"💥 WebSocket error: {e}")
+        import traceback
+        print(f"🔍 Full WebSocket traceback: {traceback.format_exc()}")
         if call_sid and call_sid in sessions:
             sessions.pop(call_sid, None)
 
@@ -326,13 +384,15 @@ async def health_check():
     return {
         "status": "healthy", 
         "domain": DOMAIN,
+        "websocket_url": WS_URL,
         "model": CHAT_MODEL,
         "optimizations": [
             "connection_pooling", 
             "smart_buffering",
             "fast_tts_config",
-            "reduced_timeouts",
-            "aggressive_vad"
+            "optimized_vad",
+            "enhanced_stt",
+            "comprehensive_timing"
         ]
     }
 
@@ -347,6 +407,11 @@ if __name__ == "__main__":
     print(f"  - GROQ_API_KEY: {'Set' if GROQ_API_KEY else 'NOT SET'}")
     print(f"  - GROQ_MODEL_NAME: {os.getenv('GROQ_MODEL_NAME', 'Not set (using default)')}")
     print(f"  - RAILWAY_STATIC_URL: {os.getenv('RAILWAY_STATIC_URL', 'Not set')}")
-    print(f"  - NGROK_URL: {os.getenv('NGROK_URL', 'Not set')}")
+    
+    print(f"🚀 STT Optimizations enabled:")
+    print(f"  - Enhanced speech model")
+    print(f"  - Faster VAD detection (150ms)")
+    print(f"  - Partial result events")
+    print(f"  - Aggressive voice detection")
     
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, workers=1)
