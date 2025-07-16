@@ -49,7 +49,7 @@ if not GROQ_API_KEY:
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # --- Chat configuration ---
-CHAT_MODEL = os.getenv("GROQ_MODEL_NAME")  # Use environment variable
+CHAT_MODEL = os.getenv("GROQ_MODEL_NAME")  # Use environment variable with fallback
 MAX_TOKENS = 100
 TEMPERATURE = 0.7
 
@@ -225,9 +225,6 @@ async def twiml_endpoint():
       vadPostambleMs="25"
       vadMinSpeechMs="100"
       vadMaxSpeechMs="8000"
-      speechModel="enhanced"
-      speechProfanityFilter="false"
-      speechPartialResultEvents="true"
     />
   </Connect>
 </Response>"""
