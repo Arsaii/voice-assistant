@@ -241,15 +241,19 @@ async def process_deepgram_response(deepgram_ws, call_sid, twilio_ws):
                     if call_sid in sessions:
                         prompt_received_time = time.time()
                         
-                        # Calculate STT timing
+                        # Calculate STT timing (fix the variable scope issue)
+                        stt_time = 0  # Default value
                         if sessions[call_sid]["timing"]["last_response_complete"]:
                             stt_time = prompt_received_time - sessions[call_sid]["timing"]["last_response_complete"]
-                            print(f"🚀 Deepgram STT time: {stt_time*1000:.0f}ms")
+                        else:
+                            stt_time = prompt_received_time - sessions[call_sid]["timing"]["setup_time"]
+                            
+                        print(f"🚀 Deepgram STT time: {stt_time*1000:.0f}ms")
                         
                         sessions[call_sid]["timing"]["last_prompt_received"] = prompt_received_time
                         
                         # Generate AI response
-                        api_response_full_text, api_time = await groq_response_streaming(
+                        response_text, api_time = await groq_response_streaming(
                             sessions[call_sid]["chat_history"], transcript, twilio_ws
                         )
                         
@@ -263,11 +267,23 @@ async def process_deepgram_response(deepgram_ws, call_sid, twilio_ws):
                         print(f"📊 DEEPGRAM TIMING BREAKDOWN:")
                         print(f"  🎙️ Deepgram STT: {stt_time*1000:.0f}ms")
                         print(f"  🧠 AI Processing: {api_time*1000:.0f}ms")
-                        print(f"  🎯 Total: {total_server_time*1000:.0f}ms")
-                        print(f"  🚀 FAST: End-to-end sub-1s response!")
+                        print(f"  🎯 Total Server: {total_server_time*1000:.0f}ms")
+                        print(f"  🔊 Response: '{response_text[:50]}...'")
+                        
+                        # Send TTS request to Twilio
+                        tts_message = {
+                            "event": "media",
+                            "media": {
+                                "payload": response_text
+                            }
+                        }
+                        await twilio_ws.send_text(json.dumps(tts_message))
+                        print(f"🗣️ Sent response to Twilio TTS")
                         
     except Exception as e:
         print(f"💥 Deepgram processing error: {e}")
+        import traceback
+        print(f"🔍 Traceback: {traceback.format_exc()}")
 
 @app.post("/twiml")
 async def twiml_endpoint():
@@ -281,9 +297,10 @@ async def twiml_endpoint():
         xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="Polly.Joanna-Neural">{WELCOME_GREETING}</Say>
-    <Connect>
+    <Start>
         <Stream url="{MEDIA_WS_URL}" />
-    </Connect>
+    </Start>
+    <Pause length="30"/>
 </Response>"""
         
         print(f"✅ TwiML response generated successfully")
