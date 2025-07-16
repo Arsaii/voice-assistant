@@ -6,8 +6,8 @@ import time
 import aiohttp
 import base64
 import websockets
-import audioop
 import io
+import struct
 from pydub import AudioSegment
 from groq import Groq
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -245,31 +245,65 @@ async def process_deepgram_response(deepgram_ws, call_sid, twilio_ws):
                         
                         print(f"🤖 AI Response: {response_text}")
                         
+def pcm_to_ulaw(pcm_data):
+    """Convert PCM audio to μ-law encoding (replacement for deprecated audioop)"""
+    ulaw_data = bytearray()
+    
+    # μ-law compression table
+    BIAS = 0x84
+    CLIP = 32635
+    
+    for i in range(0, len(pcm_data), 2):
+        if i + 1 < len(pcm_data):
+            # Convert bytes to 16-bit signed integer
+            sample = struct.unpack('<h', pcm_data[i:i+2])[0]
+            
+            # Apply μ-law compression
+            sign = 0x80 if sample < 0 else 0x00
+            if sample < 0:
+                sample = -sample
+            
+            sample = min(sample, CLIP)
+            sample += BIAS
+            
+            exponent = 7
+            for exp_lut in [0x1F80, 0x0FC0, 0x07E0, 0x03F0, 0x01F8, 0x00FC, 0x007E, 0x003F]:
+                if sample >= exp_lut:
+                    break
+                exponent -= 1
+            
+            mantissa = (sample >> (exponent + 3)) & 0x0F
+            ulaw_byte = ~(sign | (exponent << 4) | mantissa)
+            ulaw_data.append(ulaw_byte & 0xFF)
+    
+    return bytes(ulaw_data)
+
                         # Convert to speech with ElevenLabs
                         audio_data = await elevenlabs_tts(response_text)
                         
                         if audio_data:
                             # Convert MP3 to μ-law 8kHz for Twilio Media Streams
                             try:
-                                # Load MP3 data
+                                # Load MP3 data with pydub
                                 audio_segment = AudioSegment.from_mp3(io.BytesIO(audio_data))
                                 
-                                # Convert to μ-law 8kHz mono
-                                audio_segment = audio_segment.set_frame_rate(8000).set_channels(1)
+                                # Convert to 8kHz mono 16-bit PCM
+                                audio_segment = audio_segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
                                 
-                                # Export as μ-law (PCMU) raw audio
-                                raw_audio = audio_segment.raw_data
+                                # Get raw PCM data
+                                pcm_data = audio_segment.raw_data
                                 
-                                # Convert to μ-law encoding
-                                mulaw_audio = audioop.lin2ulaw(raw_audio, 2)
+                                # Convert PCM to μ-law
+                                mulaw_data = pcm_to_ulaw(pcm_data)
                                 
                                 # Encode as base64 for Twilio
-                                audio_b64 = base64.b64encode(mulaw_audio).decode('utf-8')
+                                audio_b64 = base64.b64encode(mulaw_data).decode('utf-8')
                                 
                                 print(f"🔄 Converted audio: MP3 → μ-law 8kHz ({len(audio_b64)} chars)")
                                 
                             except Exception as e:
                                 print(f"💥 Audio conversion error: {e}")
+                                print(f"🔄 Using fallback: sending raw MP3")
                                 # Fallback: send MP3 as-is
                                 audio_b64 = base64.b64encode(audio_data).decode('utf-8')
                             
