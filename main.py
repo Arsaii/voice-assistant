@@ -247,17 +247,18 @@ async def twiml_endpoint():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint with comprehensive timing analysis"""
+    """WebSocket endpoint with comprehensive timing analysis and proper disconnect handling"""
     print(f"🔌 WebSocket connection attempt from {websocket.client}")
+    
+    call_sid = None
     
     try:
         await websocket.accept()
         print(f"✅ WebSocket connected successfully")
-        call_sid = None
 
         while True:
             try:
-                # Receive and parse message
+                # Receive and parse message with proper disconnect handling
                 raw = await websocket.receive_text()
                 message = json.loads(raw)
 
@@ -338,14 +339,27 @@ async def websocket_endpoint(websocket: WebSocket):
                 print(f"💥 JSON decode error: {e}")
                 continue
                 
+            except WebSocketDisconnect:
+                print(f"🔌 WebSocket disconnect detected in message loop")
+                break
+                
             except Exception as e:
-                print(f"💥 Error in message processing: {e}")
-                import traceback
-                print(f"🔍 Traceback: {traceback.format_exc()}")
-                continue
+                # Check if it's a disconnect-related error
+                if "disconnect" in str(e).lower() or "receive" in str(e).lower():
+                    print(f"🔌 Connection closed during message processing")
+                    break
+                else:
+                    print(f"💥 Error in message processing: {e}")
+                    continue
 
     except WebSocketDisconnect:
         print(f"🔌 WebSocket disconnected normally")
+        
+    except Exception as e:
+        print(f"💥 WebSocket error: {e}")
+        
+    finally:
+        # Clean up session data
         if call_sid and call_sid in sessions:
             # Print final timing summary
             timing = sessions[call_sid]["timing"]
@@ -356,13 +370,8 @@ async def websocket_endpoint(websocket: WebSocket):
             
             sessions.pop(call_sid, None)
             print(f"🔌 Disconnected: {call_sid}")
-        
-    except Exception as e:
-        print(f"💥 WebSocket error: {e}")
-        import traceback
-        print(f"🔍 Full WebSocket traceback: {traceback.format_exc()}")
-        if call_sid and call_sid in sessions:
-            sessions.pop(call_sid, None)
+        else:
+            print(f"🔌 WebSocket disconnected (no call_sid)")
 
 @app.get("/")
 async def root():
