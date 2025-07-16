@@ -6,6 +6,9 @@ import time
 import aiohttp
 import base64
 import websockets
+import audioop
+import io
+from pydub import AudioSegment
 from groq import Groq
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
@@ -246,8 +249,29 @@ async def process_deepgram_response(deepgram_ws, call_sid, twilio_ws):
                         audio_data = await elevenlabs_tts(response_text)
                         
                         if audio_data:
-                            # Convert MP3 to base64 for Twilio
-                            audio_b64 = base64.b64encode(audio_data).decode('utf-8')
+                            # Convert MP3 to μ-law 8kHz for Twilio Media Streams
+                            try:
+                                # Load MP3 data
+                                audio_segment = AudioSegment.from_mp3(io.BytesIO(audio_data))
+                                
+                                # Convert to μ-law 8kHz mono
+                                audio_segment = audio_segment.set_frame_rate(8000).set_channels(1)
+                                
+                                # Export as μ-law (PCMU) raw audio
+                                raw_audio = audio_segment.raw_data
+                                
+                                # Convert to μ-law encoding
+                                mulaw_audio = audioop.lin2ulaw(raw_audio, 2)
+                                
+                                # Encode as base64 for Twilio
+                                audio_b64 = base64.b64encode(mulaw_audio).decode('utf-8')
+                                
+                                print(f"🔄 Converted audio: MP3 → μ-law 8kHz ({len(audio_b64)} chars)")
+                                
+                            except Exception as e:
+                                print(f"💥 Audio conversion error: {e}")
+                                # Fallback: send MP3 as-is
+                                audio_b64 = base64.b64encode(audio_data).decode('utf-8')
                             
                             # Send audio to Twilio Media Stream
                             media_message = {
@@ -258,7 +282,7 @@ async def process_deepgram_response(deepgram_ws, call_sid, twilio_ws):
                                 }
                             }
                             await twilio_ws.send_text(json.dumps(media_message))
-                            print(f"🎵 Sent ElevenLabs audio to Twilio")
+                            print(f"🎵 Sent converted audio to Twilio")
                         
                         # Mark response completion
                         response_complete_time = time.time()
