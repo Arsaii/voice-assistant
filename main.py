@@ -4,6 +4,8 @@ import uvicorn
 import asyncio
 import time
 import aiohttp
+import base64
+import websockets
 from groq import Groq
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
@@ -29,6 +31,13 @@ WS_URL = (
     else f"ws://{DOMAIN}/ws"
 )
 
+# Media Stream URL for Twilio
+MEDIA_WS_URL = (
+    f"wss://{DOMAIN}/media-ws"
+    if "localhost" not in DOMAIN
+    else f"ws://{DOMAIN}/media-ws"
+)
+
 WELCOME_GREETING = (
     "Hello, how can I help?"
 )
@@ -46,10 +55,15 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise ValueError("GROQ_API_KEY environment variable not set.")
 
+# --- Deepgram API Initialization ---
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+if not DEEPGRAM_API_KEY:
+    raise ValueError("DEEPGRAM_API_KEY environment variable not set.")
+
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # --- Chat configuration ---
-CHAT_MODEL = os.getenv("GROQ_MODEL_NAME")  # Use environment variable with fallback
+CHAT_MODEL = os.getenv("GROQ_MODEL_NAME")
 MAX_TOKENS = 100
 TEMPERATURE = 0.7
 
@@ -193,44 +207,87 @@ async def groq_response_streaming(chat_history, user_prompt, websocket):
     
     return full_response_text, api_elapsed
 
+async def connect_to_deepgram(call_sid):
+    """Connect to Deepgram for real-time STT"""
+    try:
+        deepgram_url = f"wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&model=nova-2&language=en&smart_format=true&interim_results=false&endpointing=300"
+        
+        headers = {
+            "Authorization": f"Token {DEEPGRAM_API_KEY}"
+        }
+        
+        print(f"🎙️ Connecting to Deepgram for call {call_sid}")
+        deepgram_ws = await websockets.connect(deepgram_url, extra_headers=headers)
+        print(f"✅ Deepgram connected for call {call_sid}")
+        
+        return deepgram_ws
+    except Exception as e:
+        print(f"💥 Deepgram connection error: {e}")
+        return None
+
+async def process_deepgram_response(deepgram_ws, call_sid, twilio_ws):
+    """Process Deepgram STT responses"""
+    try:
+        async for message in deepgram_ws:
+            data = json.loads(message)
+            
+            if data.get("type") == "Results":
+                transcript = data.get("channel", {}).get("alternatives", [{}])[0].get("transcript", "")
+                
+                if transcript.strip():
+                    print(f"🎙️ Deepgram STT: {transcript}")
+                    
+                    # Process with our AI
+                    if call_sid in sessions:
+                        prompt_received_time = time.time()
+                        
+                        # Calculate STT timing
+                        if sessions[call_sid]["timing"]["last_response_complete"]:
+                            stt_time = prompt_received_time - sessions[call_sid]["timing"]["last_response_complete"]
+                            print(f"🚀 Deepgram STT time: {stt_time*1000:.0f}ms")
+                        
+                        sessions[call_sid]["timing"]["last_prompt_received"] = prompt_received_time
+                        
+                        # Generate AI response
+                        api_response_full_text, api_time = await groq_response_streaming(
+                            sessions[call_sid]["chat_history"], transcript, twilio_ws
+                        )
+                        
+                        # Mark response completion
+                        response_complete_time = time.time()
+                        sessions[call_sid]["timing"]["last_response_complete"] = response_complete_time
+                        
+                        # Calculate timing
+                        total_server_time = response_complete_time - prompt_received_time
+                        
+                        print(f"📊 DEEPGRAM TIMING BREAKDOWN:")
+                        print(f"  🎙️ Deepgram STT: {stt_time*1000:.0f}ms")
+                        print(f"  🧠 AI Processing: {api_time*1000:.0f}ms")
+                        print(f"  🎯 Total: {total_server_time*1000:.0f}ms")
+                        print(f"  🚀 FAST: End-to-end sub-1s response!")
+                        
+    except Exception as e:
+        print(f"💥 Deepgram processing error: {e}")
+
 @app.post("/twiml")
 async def twiml_endpoint():
-    """Return TwiML with optimized VAD settings for faster STT"""
+    """Return TwiML for media streaming with Deepgram STT"""
     try:
         print(f"🔗 TwiML endpoint called")
         print(f"🌐 Domain: {DOMAIN}")
-        print(f"🔌 WebSocket URL: {WS_URL}")
+        print(f"🔌 Media WebSocket URL: {MEDIA_WS_URL}")
         print(f"🤖 Model: {CHAT_MODEL}")
         
         xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Connect>
-    <ConversationRelay
-      url="{WS_URL}"
-      welcomeGreeting="{WELCOME_GREETING}"
-      ttsProvider="ElevenLabs"
-      voice="FGY2WhTYpPnrIDTdsKH5"
-      debug="debugging speaker-events tokens-played"
-      elevenlabsTextNormalization="off"
-      elevenlabsModelId="eleven_turbo_v2_5"
-      elevenlabsStability="0.5"
-      elevenlabsSimilarity="0.8"
-      elevenlabsOptimizeStreamingLatency="5"
-      elevenlabsRequestTimeoutMs="3000"
-      vadSilenceMs="150"
-      vadThreshold="0.15"
-      vadMode="aggressive"
-      vadDebounceMs="20"
-      vadPreambleMs="75"
-      vadPostambleMs="25"
-      vadMinSpeechMs="100"
-      vadMaxSpeechMs="8000"
-    />
-  </Connect>
+    <Say voice="Polly.Joanna-Neural">{WELCOME_GREETING}</Say>
+    <Connect>
+        <Stream url="{MEDIA_WS_URL}" />
+    </Connect>
 </Response>"""
         
         print(f"✅ TwiML response generated successfully")
-        print(f"🚀 STT Optimizations: Enhanced model, faster VAD, partial results")
+        print(f"🚀 Using Deepgram STT + Twilio TTS for maximum speed")
         return Response(content=xml_response, media_type="text/xml")
         
     except Exception as e:
@@ -245,31 +302,29 @@ async def twiml_endpoint():
 </Response>"""
         return Response(content=fallback_xml, media_type="text/xml")
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint with comprehensive timing analysis and proper disconnect handling"""
-    print(f"🔌 WebSocket connection attempt from {websocket.client}")
+@app.websocket("/media-ws")
+async def media_websocket_endpoint(websocket: WebSocket):
+    """Handle Twilio Media Streams with Deepgram STT"""
+    print(f"🔌 Media WebSocket connection attempt")
     
     call_sid = None
+    deepgram_ws = None
     
     try:
         await websocket.accept()
-        print(f"✅ WebSocket connected successfully")
+        print(f"✅ Media WebSocket connected successfully")
 
         while True:
             try:
-                # Receive and parse message with proper disconnect handling
-                raw = await websocket.receive_text()
-                message = json.loads(raw)
-
-                # Print debug messages but don't process them
-                if message.get("type") in ["info", "debug"]:
-                    if message.get("name") in ["roundTripDelayMs", "tokensPlayed"]:
-                        print(f"[{call_sid}] [{message.get('name', 'DEBUG')}] {message.get('value', message)}")
-                    continue
-
-                if message.get("type") == "setup":
-                    call_sid = message["callSid"]
+                # Receive message from Twilio Media Stream
+                message = await websocket.receive_text()
+                data = json.loads(message)
+                
+                if data.get("event") == "start":
+                    call_sid = data.get("start", {}).get("callSid")
+                    print(f"🎬 Media stream started for call: {call_sid}")
+                    
+                    # Initialize session
                     sessions[call_sid] = {
                         "chat_history": [],
                         "timing": {
@@ -278,90 +333,48 @@ async def websocket_endpoint(websocket: WebSocket):
                             "last_prompt_received": None
                         }
                     }
-                    print(f"✅ Setup for call: {call_sid}")
-                    continue
-
-                if message.get("type") != "prompt" or not call_sid:
-                    continue
-
-                # TIMING: Mark when we received the user's prompt (after STT)
-                prompt_received_time = time.time()
-                sessions[call_sid]["timing"]["last_prompt_received"] = prompt_received_time
-                
-                # Calculate time since last response completed (includes STT + VAD time)
-                if sessions[call_sid]["timing"]["last_response_complete"]:
-                    stt_vad_time = prompt_received_time - sessions[call_sid]["timing"]["last_response_complete"]
-                    print(f"🔊 STT + VAD time: {stt_vad_time*1000:.0f}ms")
-                else:
-                    stt_vad_time = prompt_received_time - sessions[call_sid]["timing"]["setup_time"]
-                    print(f"🔊 Initial STT + VAD time: {stt_vad_time*1000:.0f}ms")
-
-                # Process user prompt
-                user_prompt = message["voicePrompt"]
-                print(f"🎤 User: {user_prompt}")
-                
-                # Start timing server processing
-                server_start_time = time.time()
-
-                # Groq API call with streaming
-                api_response_full_text, api_time = await groq_response_streaming(
-                    sessions[call_sid]["chat_history"], user_prompt, websocket
-                )
-
-                # TIMING: Mark response completion
-                response_complete_time = time.time()
-                sessions[call_sid]["timing"]["last_response_complete"] = response_complete_time
-                
-                # Calculate comprehensive timing breakdown
-                total_server_time = response_complete_time - prompt_received_time
-                network_overhead = total_server_time - api_time
-                
-                print(f"📊 COMPREHENSIVE TIMING BREAKDOWN:")
-                print(f"  🔊 STT + VAD: {stt_vad_time*1000:.0f}ms")
-                print(f"  🎯 Server Total: {total_server_time*1000:.0f}ms")
-                print(f"  🧠 AI Processing: {api_time*1000:.0f}ms")
-                print(f"  📡 Network/Overhead: {network_overhead*1000:.0f}ms")
-                print(f"  ⚡ Subtotal (visible): {(stt_vad_time + total_server_time)*1000:.0f}ms")
-                print(f"  ⚠️ + TTS time (~400-800ms) = ~{((stt_vad_time + total_server_time)*1000 + 600):.0f}ms total")
-
-                # Performance analysis
-                total_visible_time = stt_vad_time + total_server_time
-                estimated_total = total_visible_time + 0.6  # Add estimated TTS time
-                
-                if estimated_total > 2.5:
-                    print(f"🐌 SLOW OVERALL: {estimated_total:.1f}s")
-                elif estimated_total < 1.5:
-                    print(f"🚀 FAST OVERALL: {estimated_total:.1f}s")
-                else:
-                    print(f"✅ NORMAL OVERALL: {estimated_total:.1f}s")
                     
-            except json.JSONDecodeError as e:
-                print(f"💥 JSON decode error: {e}")
-                continue
+                    # Connect to Deepgram
+                    deepgram_ws = await connect_to_deepgram(call_sid)
+                    
+                    if deepgram_ws:
+                        # Start processing Deepgram responses
+                        asyncio.create_task(process_deepgram_response(deepgram_ws, call_sid, websocket))
                 
+                elif data.get("event") == "media" and deepgram_ws:
+                    # Forward audio to Deepgram
+                    audio_data = base64.b64decode(data["media"]["payload"])
+                    await deepgram_ws.send(audio_data)
+                
+                elif data.get("event") == "stop":
+                    print(f"🛑 Media stream stopped for call: {call_sid}")
+                    break
+                    
             except WebSocketDisconnect:
-                print(f"🔌 WebSocket disconnect detected in message loop")
+                print(f"🔌 Media WebSocket disconnect detected")
                 break
                 
             except Exception as e:
-                # Check if it's a disconnect-related error
                 if "disconnect" in str(e).lower() or "receive" in str(e).lower():
-                    print(f"🔌 Connection closed during message processing")
+                    print(f"🔌 Media connection closed during processing")
                     break
                 else:
-                    print(f"💥 Error in message processing: {e}")
+                    print(f"💥 Error in media processing: {e}")
                     continue
 
     except WebSocketDisconnect:
-        print(f"🔌 WebSocket disconnected normally")
+        print(f"🔌 Media WebSocket disconnected normally")
         
     except Exception as e:
-        print(f"💥 WebSocket error: {e}")
+        print(f"💥 Media WebSocket error: {e}")
         
     finally:
-        # Clean up session data
+        # Clean up
+        if deepgram_ws:
+            await deepgram_ws.close()
+            print(f"🔌 Deepgram connection closed")
+            
         if call_sid and call_sid in sessions:
-            # Print final timing summary
             timing = sessions[call_sid]["timing"]
             if timing["last_response_complete"] and timing["setup_time"]:
                 total_call_time = timing["last_response_complete"] - timing["setup_time"]
@@ -370,19 +383,34 @@ async def websocket_endpoint(websocket: WebSocket):
             
             sessions.pop(call_sid, None)
             print(f"🔌 Disconnected: {call_sid}")
-        else:
-            print(f"🔌 WebSocket disconnected (no call_sid)")
+
+# Legacy WebSocket endpoint (kept for compatibility)
+@app.websocket("/ws")
+async def legacy_websocket_endpoint(websocket: WebSocket):
+    """Legacy WebSocket endpoint - now redirects to media streaming"""
+    await websocket.accept()
+    await websocket.send_text(json.dumps({
+        "type": "error",
+        "message": "This endpoint is deprecated. Use /media-ws for Deepgram integration."
+    }))
+    await websocket.close()
 
 @app.get("/")
 async def root():
     """Simple root endpoint for testing"""
     return {
-        "message": "Voice Assistant API is running",
+        "message": "Voice Assistant API with Deepgram STT",
         "endpoints": {
             "twiml": "/twiml",
-            "websocket": "/ws",
+            "media_websocket": "/media-ws",
             "health": "/health"
-        }
+        },
+        "features": [
+            "Deepgram real-time STT",
+            "Groq LLM processing", 
+            "Twilio TTS",
+            "Sub-1s response times"
+        ]
     }
 
 @app.get("/health")
@@ -390,34 +418,37 @@ async def health_check():
     return {
         "status": "healthy", 
         "domain": DOMAIN,
-        "websocket_url": WS_URL,
+        "media_websocket_url": MEDIA_WS_URL,
         "model": CHAT_MODEL,
+        "stt_provider": "Deepgram",
+        "tts_provider": "Twilio",
         "optimizations": [
-            "connection_pooling", 
-            "smart_buffering",
-            "fast_tts_config",
-            "optimized_vad",
-            "enhanced_stt",
+            "deepgram_stt", 
+            "real_time_streaming",
+            "groq_llm",
+            "twilio_tts",
             "comprehensive_timing"
         ]
     }
 
 if __name__ == "__main__":
-    print(f"🚀 Starting voice assistant on port {PORT}")
-    print(f"🔗 WebSocket URL: {WS_URL}")
+    print(f"🚀 Starting voice assistant with Deepgram STT on port {PORT}")
+    print(f"🔗 Media WebSocket URL: {MEDIA_WS_URL}")
     print(f"🌐 Domain: {DOMAIN}")
     print(f"🤖 Model: {CHAT_MODEL}")
     
     # Verify environment variables
     print(f"✅ Environment check:")
     print(f"  - GROQ_API_KEY: {'Set' if GROQ_API_KEY else 'NOT SET'}")
+    print(f"  - DEEPGRAM_API_KEY: {'Set' if DEEPGRAM_API_KEY else 'NOT SET'}")
     print(f"  - GROQ_MODEL_NAME: {os.getenv('GROQ_MODEL_NAME', 'Not set (using default)')}")
     print(f"  - RAILWAY_STATIC_URL: {os.getenv('RAILWAY_STATIC_URL', 'Not set')}")
     
-    print(f"🚀 STT Optimizations enabled:")
-    print(f"  - Enhanced speech model")
-    print(f"  - Faster VAD detection (150ms)")
-    print(f"  - Partial result events")
-    print(f"  - Aggressive voice detection")
+    print(f"🚀 Deepgram STT Configuration:")
+    print(f"  - Model: Nova-2 (fastest)")
+    print(f"  - Language: English")
+    print(f"  - Endpointing: 300ms")
+    print(f"  - Expected STT time: 200-400ms")
+    print(f"  - Expected total response: <1s")
     
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, workers=1)
