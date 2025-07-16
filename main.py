@@ -188,19 +188,24 @@ async def elevenlabs_tts(text):
 async def connect_to_deepgram(call_sid):
     """Connect to Deepgram for real-time STT"""
     try:
-        deepgram_url = f"wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&model=nova-2&language=en&smart_format=true&interim_results=false&endpointing=200&vad_turnoff=100"
+        # Simplified Deepgram URL with basic parameters
+        deepgram_url = f"wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&model=nova-2&language=en&smart_format=true&interim_results=false"
         
         headers = {
             "Authorization": f"Token {DEEPGRAM_API_KEY}"
         }
         
         print(f"🎙️ Connecting to Deepgram for call {call_sid}")
+        print(f"🔍 Deepgram URL: {deepgram_url}")
+        print(f"🔑 API Key set: {'Yes' if DEEPGRAM_API_KEY else 'No'}")
+        
         deepgram_ws = await websockets.connect(deepgram_url, extra_headers=headers)
         print(f"✅ Deepgram connected for call {call_sid}")
         
         return deepgram_ws
     except Exception as e:
         print(f"💥 Deepgram connection error: {e}")
+        print(f"🔍 Check your DEEPGRAM_API_KEY environment variable")
         return None
 
 async def process_deepgram_response(deepgram_ws, call_sid, twilio_ws):
@@ -438,6 +443,8 @@ if __name__ == "__main__":
     print(f"✅ Environment check:")
     print(f"  - GROQ_API_KEY: {'Set' if GROQ_API_KEY else 'NOT SET'}")
     print(f"  - DEEPGRAM_API_KEY: {'Set' if DEEPGRAM_API_KEY else 'NOT SET'}")
+    if DEEPGRAM_API_KEY:
+        print(f"  - DEEPGRAM_API_KEY length: {len(DEEPGRAM_API_KEY)} characters")
     print(f"  - EL_API_KEY: {'Set' if ELEVENLABS_API_KEY else 'NOT SET'}")
     print(f"  - GROQ_MODEL_NAME: {CHAT_MODEL}")
     print(f"  - ELEVENLABS_VOICE_ID: {ELEVENLABS_VOICE_ID}")
