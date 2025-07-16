@@ -89,6 +89,39 @@ async def create_http_session():
 # Store active chat sessions with conversation history and timing data
 sessions: dict[str, dict] = {}
 
+def pcm_to_ulaw(pcm_data):
+    """Convert PCM audio to μ-law encoding (replacement for deprecated audioop)"""
+    ulaw_data = bytearray()
+    
+    # μ-law compression table
+    BIAS = 0x84
+    CLIP = 32635
+    
+    for i in range(0, len(pcm_data), 2):
+        if i + 1 < len(pcm_data):
+            # Convert bytes to 16-bit signed integer
+            sample = struct.unpack('<h', pcm_data[i:i+2])[0]
+            
+            # Apply μ-law compression
+            sign = 0x80 if sample < 0 else 0x00
+            if sample < 0:
+                sample = -sample
+            
+            sample = min(sample, CLIP)
+            sample += BIAS
+            
+            exponent = 7
+            for exp_lut in [0x1F80, 0x0FC0, 0x07E0, 0x03F0, 0x01F8, 0x00FC, 0x007E, 0x003F]:
+                if sample >= exp_lut:
+                    break
+                exponent -= 1
+            
+            mantissa = (sample >> (exponent + 3)) & 0x0F
+            ulaw_byte = ~(sign | (exponent << 4) | mantissa)
+            ulaw_data.append(ulaw_byte & 0xFF)
+    
+    return bytes(ulaw_data)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan event handler"""
@@ -245,39 +278,6 @@ async def process_deepgram_response(deepgram_ws, call_sid, twilio_ws):
                         
                         print(f"🤖 AI Response: {response_text}")
                         
-def pcm_to_ulaw(pcm_data):
-    """Convert PCM audio to μ-law encoding (replacement for deprecated audioop)"""
-    ulaw_data = bytearray()
-    
-    # μ-law compression table
-    BIAS = 0x84
-    CLIP = 32635
-    
-    for i in range(0, len(pcm_data), 2):
-        if i + 1 < len(pcm_data):
-            # Convert bytes to 16-bit signed integer
-            sample = struct.unpack('<h', pcm_data[i:i+2])[0]
-            
-            # Apply μ-law compression
-            sign = 0x80 if sample < 0 else 0x00
-            if sample < 0:
-                sample = -sample
-            
-            sample = min(sample, CLIP)
-            sample += BIAS
-            
-            exponent = 7
-            for exp_lut in [0x1F80, 0x0FC0, 0x07E0, 0x03F0, 0x01F8, 0x00FC, 0x007E, 0x003F]:
-                if sample >= exp_lut:
-                    break
-                exponent -= 1
-            
-            mantissa = (sample >> (exponent + 3)) & 0x0F
-            ulaw_byte = ~(sign | (exponent << 4) | mantissa)
-            ulaw_data.append(ulaw_byte & 0xFF)
-    
-    return bytes(ulaw_data)
-
                         # Convert to speech with ElevenLabs
                         audio_data = await elevenlabs_tts(response_text)
                         
