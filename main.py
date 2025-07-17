@@ -5,7 +5,7 @@ import asyncio
 import time
 import aiohttp
 from groq import Groq
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import Response
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -29,9 +29,7 @@ WS_URL = (
     else f"ws://{DOMAIN}/ws"
 )
 
-WELCOME_GREETING = (
-    "Hello, how can I help?"
-)
+WELCOME_GREETING = "Hello, how can I help?"
 
 # --- OPTIMIZED: Shorter, more focused system prompt for voice ---
 SYSTEM_PROMPT = """You are a helpful voice assistant. Keep responses conversational and concise since this is a phone call. 
@@ -41,15 +39,24 @@ Rules:
 3. No special characters, bullets, or formatting
 4. Sound natural and friendly"""
 
-# --- Groq API Initialization ---
+# --- API Initializations ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise ValueError("GROQ_API_KEY environment variable not set.")
 
+ELEVENLABS_API_KEY = os.getenv("EL_API_KEY")
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "FGY2WhTYpPnrIDTdsKH5")
+if not ELEVENLABS_API_KEY:
+    raise ValueError("EL_API_KEY environment variable not set.")
+
+TELNYX_API_KEY = os.getenv("TELNYX_API_KEY")
+if not TELNYX_API_KEY:
+    raise ValueError("TELNYX_API_KEY environment variable not set.")
+
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # --- Chat configuration ---
-CHAT_MODEL = os.getenv("GROQ_MODEL_NAME")  # Use environment variable with fallback
+CHAT_MODEL = os.getenv("GROQ_MODEL_NAME")
 MAX_TOKENS = 100
 TEMPERATURE = 0.7
 
@@ -73,7 +80,7 @@ sessions: dict[str, dict] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """FastAPI lifespan event handler (replaces deprecated startup/shutdown events)"""
+    """FastAPI lifespan event handler"""
     # Startup
     global http_session
     http_session = await create_http_session()
@@ -89,14 +96,10 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app with lifespan
 app = FastAPI(lifespan=lifespan)
 
-async def groq_response_streaming(chat_history, user_prompt, websocket):
-    """
-    OPTIMIZED: Streaming with Groq Llama for ultra-fast response times.
-    """
+async def groq_response_streaming(chat_history, user_prompt):
+    """Generate AI response using Groq"""
     start_api = time.time()
     full_response_text = ""
-    buffer = ""
-    buffer_size = 20  # Minimum characters before sending
     
     try:
         # Add user message to chat history
@@ -114,62 +117,10 @@ async def groq_response_streaming(chat_history, user_prompt, websocket):
             stream=True,
         )
         
-        first_chunk_sent = False
-        first_chunk_time = None
-        
+        # Collect the full response
         for chunk in stream:
             if chunk.choices[0].delta.content:
-                content = chunk.choices[0].delta.content
-                
-                if first_chunk_time is None:
-                    first_chunk_time = time.time()
-                    ttfb = first_chunk_time - start_api
-                    print(f"📡 TTFB: {ttfb*1000:.0f}ms")
-                
-                full_response_text += content
-                buffer += content
-                
-                # Send first chunk immediately for faster TTFB
-                if not first_chunk_sent and len(buffer) >= 5:
-                    await websocket.send_text(json.dumps({
-                        "type": "text",
-                        "token": buffer,
-                        "last": False
-                    }))
-                    buffer = ""
-                    first_chunk_sent = True
-                    continue
-                
-                # Smart buffering based on content and length
-                should_send = (
-                    len(buffer) >= buffer_size or 
-                    any(punct in buffer for punct in ['.', '!', '?', '\n']) or
-                    buffer.endswith(', ') or  # Natural pause points
-                    len(buffer) >= 50  # Don't let buffer get too large
-                )
-                
-                if should_send and first_chunk_sent:
-                    await websocket.send_text(json.dumps({
-                        "type": "text",
-                        "token": buffer,
-                        "last": False
-                    }))
-                    buffer = ""
-
-        # Send any remaining buffer
-        if buffer:
-            await websocket.send_text(json.dumps({
-                "type": "text",
-                "token": buffer,
-                "last": False
-            }))
-        
-        # Send completion signal
-        await websocket.send_text(json.dumps({
-            "type": "text",
-            "token": "",
-            "last": True
-        }))
+                full_response_text += chunk.choices[0].delta.content
         
         # Add assistant response to chat history
         chat_history.append({"role": "assistant", "content": full_response_text})
@@ -180,209 +131,165 @@ async def groq_response_streaming(chat_history, user_prompt, websocket):
 
     except Exception as e:
         print(f"💥 Groq API error: {e}")
-        error_message = "I encountered an error. Please try again."
-        await websocket.send_text(json.dumps({
-            "type": "text",
-            "token": error_message,
-            "last": True
-        }))
-        return error_message, time.time() - start_api
+        full_response_text = "I encountered an error. Please try again."
 
     api_elapsed = time.time() - start_api
-    print(f"⚡ API total: {api_elapsed*1000:.0f}ms")
+    print(f"⚡ Groq API: {api_elapsed*1000:.0f}ms")
     
     return full_response_text, api_elapsed
 
-@app.post("/twiml")
-async def twiml_endpoint():
-    """Return TwiML with optimized VAD settings for faster STT"""
+@app.post("/texml")
+async def texml_endpoint():
+    """Return TeXML using Telnyx's built-in STT + ElevenLabs TTS"""
     try:
-        print(f"🔗 TwiML endpoint called")
+        print(f"🔗 TeXML endpoint called")
         print(f"🌐 Domain: {DOMAIN}")
-        print(f"🔌 WebSocket URL: {WS_URL}")
         print(f"🤖 Model: {CHAT_MODEL}")
         
+        # Simple TeXML equivalent to Twilio ConversationRelay
         xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Connect>
-    <ConversationRelay
-      url="{WS_URL}"
-      welcomeGreeting="{WELCOME_GREETING}"
-      ttsProvider="ElevenLabs"
-      voice="FGY2WhTYpPnrIDTdsKH5"
-      debug="debugging speaker-events tokens-played"
-      elevenlabsTextNormalization="off"
-      elevenlabsModelId="eleven_turbo_v2_5"
-      elevenlabsStability="0.5"
-      elevenlabsSimilarity="0.8"
-      elevenlabsOptimizeStreamingLatency="5"
-      elevenlabsRequestTimeoutMs="3000"
-      vadSilenceMs="150"
-      vadThreshold="0.15"
-      vadMode="aggressive"
-      vadDebounceMs="20"
-      vadPreambleMs="75"
-      vadPostambleMs="25"
-      vadMinSpeechMs="100"
-      vadMaxSpeechMs="8000"
-    />
-  </Connect>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{WELCOME_GREETING}</Say>
+    <Gather action="/texml-response" method="POST" timeout="10" finishOnKey="">
+        <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I'm listening...</Say>
+    </Gather>
 </Response>"""
         
-        print(f"✅ TwiML response generated successfully")
-        print(f"🚀 STT Optimizations: Enhanced model, faster VAD, partial results")
+        print(f"✅ TeXML response generated successfully")
+        print(f"🚀 Using Telnyx Frankfurt STT + ElevenLabs TTS")
         return Response(content=xml_response, media_type="text/xml")
         
     except Exception as e:
-        print(f"💥 TwiML endpoint error: {e}")
+        print(f"💥 TeXML endpoint error: {e}")
         import traceback
         print(f"🔍 Full traceback: {traceback.format_exc()}")
         
-        # Return a simple fallback TwiML
         fallback_xml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say>Sorry, there was an error setting up the call. Please try again.</Say>
 </Response>"""
         return Response(content=fallback_xml, media_type="text/xml")
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint with comprehensive timing analysis and proper disconnect handling"""
-    print(f"🔌 WebSocket connection attempt from {websocket.client}")
-    
-    call_sid = None
-    
+@app.post("/texml-response")
+async def texml_response_endpoint(request: Request):
+    """Handle Telnyx STT results and generate AI response with comprehensive timing"""
     try:
-        await websocket.accept()
-        print(f"✅ WebSocket connected successfully")
+        # TIMING: Mark when we received the user's prompt (after STT)
+        prompt_received_time = time.time()
+        
+        # Get form data from Telnyx
+        form = await request.form()
+        transcript = form.get("SpeechResult", "")
+        call_control_id = form.get("CallControlId", "")
+        
+        print(f"🎤 Telnyx STT: {transcript}")
+        
+        if not transcript:
+            # No speech detected, try again
+            xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Gather action="/texml-response" method="POST" timeout="10">
+        <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't catch that. Could you repeat?</Say>
+    </Gather>
+</Response>"""
+            return Response(content=xml_response, media_type="text/xml")
+        
+        # Initialize session if needed
+        if call_control_id not in sessions:
+            sessions[call_control_id] = {
+                "chat_history": [],
+                "timing": {
+                    "setup_time": time.time(),
+                    "last_response_complete": None,
+                    "last_prompt_received": None
+                }
+            }
+        
+        # Calculate STT + VAD time
+        stt_vad_time = 0
+        if sessions[call_control_id]["timing"]["last_response_complete"]:
+            stt_vad_time = prompt_received_time - sessions[call_control_id]["timing"]["last_response_complete"]
+            print(f"🔊 Telnyx STT + VAD time: {stt_vad_time*1000:.0f}ms")
+        else:
+            stt_vad_time = prompt_received_time - sessions[call_control_id]["timing"]["setup_time"]
+            print(f"🔊 Initial Telnyx STT + VAD time: {stt_vad_time*1000:.0f}ms")
+        
+        sessions[call_control_id]["timing"]["last_prompt_received"] = prompt_received_time
+        
+        # Generate AI response
+        response_text, api_time = await groq_response_streaming(
+            sessions[call_control_id]["chat_history"], transcript
+        )
+        
+        # TIMING: Mark response completion
+        response_complete_time = time.time()
+        sessions[call_control_id]["timing"]["last_response_complete"] = response_complete_time
+        
+        # Calculate comprehensive timing breakdown
+        total_server_time = response_complete_time - prompt_received_time
+        network_overhead = total_server_time - api_time
+        
+        print(f"🤖 AI Response: {response_text}")
+        print(f"📊 TELNYX TIMING BREAKDOWN:")
+        print(f"  🔊 Telnyx STT + VAD: {stt_vad_time*1000:.0f}ms")
+        print(f"  🎯 Server Total: {total_server_time*1000:.0f}ms")
+        print(f"  🧠 AI Processing: {api_time*1000:.0f}ms")
+        print(f"  📡 Network/Overhead: {network_overhead*1000:.0f}ms")
+        print(f"  ⚡ Subtotal (visible): {(stt_vad_time + total_server_time)*1000:.0f}ms")
+        print(f"  ⚠️ + ElevenLabs TTS time (~400-800ms) = ~{((stt_vad_time + total_server_time)*1000 + 600):.0f}ms total")
+        print(f"  🇩🇪 Frankfurt routing active!")
 
-        while True:
-            try:
-                # Receive and parse message with proper disconnect handling
-                raw = await websocket.receive_text()
-                message = json.loads(raw)
-
-                # Print debug messages but don't process them
-                if message.get("type") in ["info", "debug"]:
-                    if message.get("name") in ["roundTripDelayMs", "tokensPlayed"]:
-                        print(f"[{call_sid}] [{message.get('name', 'DEBUG')}] {message.get('value', message)}")
-                    continue
-
-                if message.get("type") == "setup":
-                    call_sid = message["callSid"]
-                    sessions[call_sid] = {
-                        "chat_history": [],
-                        "timing": {
-                            "setup_time": time.time(),
-                            "last_response_complete": None,
-                            "last_prompt_received": None
-                        }
-                    }
-                    print(f"✅ Setup for call: {call_sid}")
-                    continue
-
-                if message.get("type") != "prompt" or not call_sid:
-                    continue
-
-                # TIMING: Mark when we received the user's prompt (after STT)
-                prompt_received_time = time.time()
-                sessions[call_sid]["timing"]["last_prompt_received"] = prompt_received_time
-                
-                # Calculate time since last response completed (includes STT + VAD time)
-                if sessions[call_sid]["timing"]["last_response_complete"]:
-                    stt_vad_time = prompt_received_time - sessions[call_sid]["timing"]["last_response_complete"]
-                    print(f"🔊 STT + VAD time: {stt_vad_time*1000:.0f}ms")
-                else:
-                    stt_vad_time = prompt_received_time - sessions[call_sid]["timing"]["setup_time"]
-                    print(f"🔊 Initial STT + VAD time: {stt_vad_time*1000:.0f}ms")
-
-                # Process user prompt
-                user_prompt = message["voicePrompt"]
-                print(f"🎤 User: {user_prompt}")
-                
-                # Start timing server processing
-                server_start_time = time.time()
-
-                # Groq API call with streaming
-                api_response_full_text, api_time = await groq_response_streaming(
-                    sessions[call_sid]["chat_history"], user_prompt, websocket
-                )
-
-                # TIMING: Mark response completion
-                response_complete_time = time.time()
-                sessions[call_sid]["timing"]["last_response_complete"] = response_complete_time
-                
-                # Calculate comprehensive timing breakdown
-                total_server_time = response_complete_time - prompt_received_time
-                network_overhead = total_server_time - api_time
-                
-                print(f"📊 COMPREHENSIVE TIMING BREAKDOWN:")
-                print(f"  🔊 STT + VAD: {stt_vad_time*1000:.0f}ms")
-                print(f"  🎯 Server Total: {total_server_time*1000:.0f}ms")
-                print(f"  🧠 AI Processing: {api_time*1000:.0f}ms")
-                print(f"  📡 Network/Overhead: {network_overhead*1000:.0f}ms")
-                print(f"  ⚡ Subtotal (visible): {(stt_vad_time + total_server_time)*1000:.0f}ms")
-                print(f"  ⚠️ + TTS time (~400-800ms) = ~{((stt_vad_time + total_server_time)*1000 + 600):.0f}ms total")
-
-                # Performance analysis
-                total_visible_time = stt_vad_time + total_server_time
-                estimated_total = total_visible_time + 0.6  # Add estimated TTS time
-                
-                if estimated_total > 2.5:
-                    print(f"🐌 SLOW OVERALL: {estimated_total:.1f}s")
-                elif estimated_total < 1.5:
-                    print(f"🚀 FAST OVERALL: {estimated_total:.1f}s")
-                else:
-                    print(f"✅ NORMAL OVERALL: {estimated_total:.1f}s")
-                    
-            except json.JSONDecodeError as e:
-                print(f"💥 JSON decode error: {e}")
-                continue
-                
-            except WebSocketDisconnect:
-                print(f"🔌 WebSocket disconnect detected in message loop")
-                break
-                
-            except Exception as e:
-                # Check if it's a disconnect-related error
-                if "disconnect" in str(e).lower() or "receive" in str(e).lower():
-                    print(f"🔌 Connection closed during message processing")
-                    break
-                else:
-                    print(f"💥 Error in message processing: {e}")
-                    continue
-
-    except WebSocketDisconnect:
-        print(f"🔌 WebSocket disconnected normally")
+        # Performance analysis
+        total_visible_time = stt_vad_time + total_server_time
+        estimated_total = total_visible_time + 0.6  # Add estimated TTS time
+        
+        if estimated_total > 2.5:
+            print(f"🐌 SLOW OVERALL: {estimated_total:.1f}s")
+        elif estimated_total < 1.5:
+            print(f"🚀 FAST OVERALL: {estimated_total:.1f}s")
+        else:
+            print(f"✅ NORMAL OVERALL: {estimated_total:.1f}s")
+        
+        # Return TeXML with AI response
+        xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{response_text}</Say>
+    <Gather action="/texml-response" method="POST" timeout="10">
+        <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Anything else I can help with?</Say>
+    </Gather>
+</Response>"""
+        
+        return Response(content=xml_response, media_type="text/xml")
         
     except Exception as e:
-        print(f"💥 WebSocket error: {e}")
+        print(f"💥 TeXML response error: {e}")
+        import traceback
+        print(f"🔍 Traceback: {traceback.format_exc()}")
         
-    finally:
-        # Clean up session data
-        if call_sid and call_sid in sessions:
-            # Print final timing summary
-            timing = sessions[call_sid]["timing"]
-            if timing["last_response_complete"] and timing["setup_time"]:
-                total_call_time = timing["last_response_complete"] - timing["setup_time"]
-                print(f"📊 CALL SUMMARY for {call_sid}:")
-                print(f"  🕒 Total call duration: {total_call_time:.1f}s")
-            
-            sessions.pop(call_sid, None)
-            print(f"🔌 Disconnected: {call_sid}")
-        else:
-            print(f"🔌 WebSocket disconnected (no call_sid)")
+        xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Sorry, I had an error. Please try again.</Say>
+    <Hangup/>
+</Response>"""
+        return Response(content=xml_response, media_type="text/xml")
 
 @app.get("/")
 async def root():
     """Simple root endpoint for testing"""
     return {
-        "message": "Voice Assistant API is running",
+        "message": "Telnyx Voice Assistant API with Frankfurt routing",
         "endpoints": {
-            "twiml": "/twiml",
-            "websocket": "/ws",
+            "texml": "/texml",
+            "texml_response": "/texml-response",
             "health": "/health"
-        }
+        },
+        "features": [
+            "Telnyx Frankfurt servers (low latency)",
+            "Telnyx built-in STT",
+            "Groq LLM processing", 
+            "ElevenLabs TTS",
+            "Comprehensive timing analysis"
+        ]
     }
 
 @app.get("/health")
@@ -390,34 +297,35 @@ async def health_check():
     return {
         "status": "healthy", 
         "domain": DOMAIN,
-        "websocket_url": WS_URL,
         "model": CHAT_MODEL,
+        "stt_provider": "Telnyx Frankfurt",
+        "tts_provider": "ElevenLabs",
+        "llm_provider": "Groq",
+        "voice_id": ELEVENLABS_VOICE_ID,
         "optimizations": [
-            "connection_pooling", 
-            "smart_buffering",
-            "fast_tts_config",
-            "optimized_vad",
-            "enhanced_stt",
+            "telnyx_frankfurt_routing", 
+            "groq_llm",
+            "elevenlabs_tts",
             "comprehensive_timing"
         ]
     }
 
 if __name__ == "__main__":
-    print(f"🚀 Starting voice assistant on port {PORT}")
-    print(f"🔗 WebSocket URL: {WS_URL}")
+    print(f"🚀 Starting Telnyx voice assistant with Frankfurt routing")
     print(f"🌐 Domain: {DOMAIN}")
-    print(f"🤖 Model: {CHAT_MODEL}")
+    print(f"🤖 Groq Model: {CHAT_MODEL}")
+    print(f"🎵 ElevenLabs Voice: {ELEVENLABS_VOICE_ID}")
     
     # Verify environment variables
     print(f"✅ Environment check:")
     print(f"  - GROQ_API_KEY: {'Set' if GROQ_API_KEY else 'NOT SET'}")
-    print(f"  - GROQ_MODEL_NAME: {os.getenv('GROQ_MODEL_NAME', 'Not set (using default)')}")
-    print(f"  - RAILWAY_STATIC_URL: {os.getenv('RAILWAY_STATIC_URL', 'Not set')}")
+    print(f"  - EL_API_KEY: {'Set' if ELEVENLABS_API_KEY else 'NOT SET'}")
+    print(f"  - TELNYX_API_KEY: {'Set' if TELNYX_API_KEY else 'NOT SET'}")
+    print(f"  - GROQ_MODEL_NAME: {CHAT_MODEL}")
+    print(f"  - ELEVENLABS_VOICE_ID: {ELEVENLABS_VOICE_ID}")
     
-    print(f"🚀 STT Optimizations enabled:")
-    print(f"  - Enhanced speech model")
-    print(f"  - Faster VAD detection (150ms)")
-    print(f"  - Partial result events")
-    print(f"  - Aggressive voice detection")
+    print(f"🇩🇪 Clean Telnyx Pipeline:")
+    print(f"  Your voice → Telnyx Frankfurt STT → Groq LLM → ElevenLabs TTS → Your ears")
+    print(f"  Expected performance with Frankfurt routing: <2s total response time")
     
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, workers=1)
