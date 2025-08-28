@@ -265,31 +265,47 @@ async def texml_endpoint(request: Request):
 async def voice_webhook(request: Request):
     """Handle Voice API webhooks including transcription events"""
     try:
-        print(f"🎯 Voice webhook called!")
+        print(f"========== VOICE WEBHOOK DEBUG ==========")
+        print(f"Method: {request.method}")
+        print(f"URL: {request.url}")
+        print(f"Headers: {dict(request.headers)}")
         
         # Try to parse as JSON first, then fall back to form data
         webhook_data = {}
         content_type = request.headers.get("content-type", "")
-        print(f"📋 Content-Type: {content_type}")
+        print(f"Content-Type: {content_type}")
         
         try:
             # Try JSON first
             webhook_data = await request.json()
-            print(f"📋 JSON webhook data: {webhook_data}")
-        except:
+            print(f"Successfully parsed as JSON")
+            print(f"JSON webhook data: {json.dumps(webhook_data, indent=2)}")
+        except Exception as json_error:
+            print(f"JSON parsing failed: {json_error}")
             try:
                 # Fall back to form data
                 form = await request.form()
                 webhook_data = dict(form)
-                print(f"📋 Form webhook data: {webhook_data}")
-            except:
-                # Last resort - query params
-                webhook_data = dict(request.query_params)
-                print(f"📋 Query webhook data: {webhook_data}")
+                print(f"Successfully parsed as form data")
+                print(f"Form webhook data: {webhook_data}")
+            except Exception as form_error:
+                print(f"Form parsing failed: {form_error}")
+                try:
+                    # Last resort - query params
+                    webhook_data = dict(request.query_params)
+                    print(f"Using query params as fallback")
+                    print(f"Query webhook data: {webhook_data}")
+                except Exception as query_error:
+                    print(f"Query parsing failed: {query_error}")
         
         if not webhook_data:
-            print("⚠️ No webhook data received")
+            print("WARNING: No webhook data received at all")
             return Response(content="OK", media_type="text/plain")
+        
+        # Detailed webhook data analysis
+        print(f"========== WEBHOOK DATA ANALYSIS ==========")
+        print(f"Total fields received: {len(webhook_data)}")
+        print(f"All field names: {list(webhook_data.keys())}")
         
         # Handle different webhook formats
         event_type = ""
@@ -297,38 +313,61 @@ async def voice_webhook(request: Request):
         
         # Check if it's the nested format (data.event_type)
         if "data" in webhook_data:
+            print("Detected nested format with 'data' field")
             event_type = webhook_data.get("data", {}).get("event_type", "")
             payload = webhook_data.get("data", {}).get("payload", {})
+            print(f"Nested event_type: {event_type}")
+            print(f"Nested payload keys: {list(payload.keys()) if isinstance(payload, dict) else 'Not a dict'}")
         else:
-            # Check if it's flat format
-            event_type = webhook_data.get("event_type", webhook_data.get("EventType", ""))
+            print("Detected flat format, checking for event_type variants")
+            # Check multiple possible event type field names
+            for field in ["event_type", "EventType", "Event", "event", "Type", "CallStatus"]:
+                if field in webhook_data:
+                    event_type = webhook_data.get(field, "")
+                    print(f"Found event type in field '{field}': {event_type}")
+                    break
             payload = webhook_data
         
-        print(f"🔔 Event type: {event_type}")
+        print(f"Final event_type: '{event_type}'")
+        print(f"========== EVENT PROCESSING ==========")
         
         if event_type == "call.transcription":
-            # Handle transcription events
+            print("Processing call.transcription event")
             await handle_transcription_event(payload)
         elif event_type == "call.answered":
-            # Handle call answered - start transcription
+            print("Processing call.answered event")
             call_control_id = payload.get("call_control_id", payload.get("CallControlId", ""))
             if call_control_id:
-                print(f"📞 Call answered, starting transcription for {call_control_id}")
+                print(f"Call answered, starting transcription for {call_control_id}")
                 await start_voice_api_transcription(call_control_id)
+            else:
+                print("No call_control_id found in call.answered event")
         elif "transcription" in str(webhook_data).lower():
-            # Fallback for any transcription-related data
-            print("🎤 Detected transcription data, attempting to parse...")
+            print("Detected transcription-related data via keyword search")
             await handle_transcription_fallback(webhook_data)
         else:
-            print(f"ℹ️ Unhandled event type: {event_type}")
-            print(f"🔍 Full data keys: {list(webhook_data.keys())}")
+            print(f"Unhandled event type: '{event_type}'")
+            print(f"Searching for transcription keywords in data...")
+            
+            # Look for any transcription-related keywords
+            data_str = str(webhook_data).lower()
+            transcription_keywords = ["transcript", "speech", "recognition", "audio", "voice"]
+            found_keywords = [kw for kw in transcription_keywords if kw in data_str]
+            
+            if found_keywords:
+                print(f"Found transcription keywords: {found_keywords}")
+                await handle_transcription_fallback(webhook_data)
+            else:
+                print("No transcription keywords found")
+                print("This might be a call status or other non-transcription event")
         
+        print(f"========== WEBHOOK PROCESSING COMPLETE ==========")
         return Response(content="OK", media_type="text/plain")
         
     except Exception as e:
-        print(f"💥 Voice webhook error: {e}")
+        print(f"CRITICAL ERROR in voice webhook: {e}")
         import traceback
-        print(f"🔍 Traceback: {traceback.format_exc()}")
+        print(f"Full traceback: {traceback.format_exc()}")
         return Response(content="ERROR", media_type="text/plain")
 
 async def handle_transcription_event(payload):
