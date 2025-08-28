@@ -95,14 +95,17 @@ async def groq_response_streaming(chat_history, user_prompt):
             chat_history = chat_history[-10:]
 
     except Exception as e:
+        print(f"💥 Groq API error: {e}")
         full_response_text = "I encountered an error. Please try again."
 
     api_elapsed = time.time() - start_api
+    print(f"⚡ Groq API: {api_elapsed*1000:.0f}ms")
     
     return full_response_text, api_elapsed
 
 async def answer_call(call_control_id):
     try:
+        print(f"📞 Answering call {call_control_id}")
         url = f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/answer"
         
         headers = {
@@ -113,16 +116,22 @@ async def answer_call(call_control_id):
         payload = {}
         
         async with http_session.post(url, headers=headers, json=payload) as response:
-            if response.status != 200:
+            if response.status == 200:
+                result = await response.json()
+                print(f"✅ Call answered: {result}")
+                return True
+            else:
                 error_text = await response.text()
+                print(f"❌ Failed to answer call ({response.status}): {error_text}")
                 return False
-            return True
                 
-    except Exception:
+    except Exception as e:
+        print(f"💥 Error answering call: {e}")
         return False
 
 async def start_voice_api_transcription(call_control_id):
     try:
+        print(f"🎤 Starting transcription for call {call_control_id}")
         url = f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/transcription_start"
         
         headers = {
@@ -137,16 +146,22 @@ async def start_voice_api_transcription(call_control_id):
         }
         
         async with http_session.post(url, headers=headers, json=payload) as response:
-            if response.status != 200:
+            if response.status == 200:
+                result = await response.json()
+                print(f"✅ Transcription started: {result}")
+                return True
+            else:
                 error_text = await response.text()
+                print(f"❌ Failed to start transcription ({response.status}): {error_text}")
                 return False
-            return True
                 
-    except Exception:
+    except Exception as e:
+        print(f"💥 Error starting transcription: {e}")
         return False
 
 async def speak_response_to_call(call_control_id, response_text):
     try:
+        print(f"🗣️ Speaking to call {call_control_id}: {response_text[:50]}...")
         url = f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/speak"
         
         headers = {
@@ -163,56 +178,73 @@ async def speak_response_to_call(call_control_id, response_text):
         }
         
         async with http_session.post(url, headers=headers, json=payload) as response:
-            if response.status != 200:
+            if response.status == 200:
+                result = await response.json()
+                print(f"✅ Speak successful: {result}")
+            else:
                 error_text = await response.text()
+                print(f"❌ Speak failed ({response.status}): {error_text}")
                 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"💥 Error speaking to call: {e}")
 
 @app.post("/webhooks/voice")
 async def voice_webhook(request: Request):
     try:
+        print("========== VOICE WEBHOOK RECEIVED ==========")
         webhook_data = await request.json()
         event_type = webhook_data.get("data", {}).get("event_type", "")
         payload = webhook_data.get("data", {}).get("payload", {})
+        print(f"Received event: {event_type}, payload keys: {list(payload.keys())}")
         
         call_control_id = payload.get("call_control_id", "")
         
         if event_type == "call.initiated":
+            print(f"Processing call.initiated for {call_control_id}")
             await answer_call(call_control_id)
         elif event_type == "call.answered":
+            print(f"Processing call.answered for {call_control_id}")
             await speak_response_to_call(call_control_id, WELCOME_GREETING)
             await start_voice_api_transcription(call_control_id)
         elif event_type == "call.transcription":
+            print(f"Processing call.transcription for {call_control_id}")
             await handle_transcription_event(payload)
         
+        print("========== WEBHOOK PROCESSING COMPLETE ==========")
         return Response(content="OK", media_type="text/plain")
         
-    except Exception:
+    except Exception as e:
+        print(f"CRITICAL ERROR in voice webhook: {e}")
         return Response(content="ERROR", media_type="text/plain")
 
 async def handle_transcription_event(payload):
     try:
         call_control_id = payload.get("call_control_id", "")
         transcription_data = payload.get("transcription_data", {})
+        print(f"Full transcription data: {transcription_data}")
         
         transcript = transcription_data.get("transcript", "").strip()
         is_final = transcription_data.get("is_final", False)
+        confidence = transcription_data.get("confidence", 1.0)
+        print(f"🎤 Transcript: '{transcript}' (Final: {is_final}, Confidence: {confidence})")
         
         if is_final and transcript and len(transcript) > 1:
+            print(f"🤖 Processing final transcript: '{transcript}'")
             if call_control_id not in sessions:
                 sessions[call_control_id] = {
                     "chat_history": []
                 }
+                print(f"🆕 New session for {call_control_id}")
             
-            response_text, _ = await groq_response_streaming(
+            response_text, api_time = await groq_response_streaming(
                 sessions[call_control_id]["chat_history"], transcript
             )
+            print(f"🤖 AI Response: '{response_text}'")
             
             await speak_response_to_call(call_control_id, response_text)
         
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"💥 Error handling transcription: {e}")
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, workers=1)
