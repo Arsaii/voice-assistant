@@ -165,14 +165,37 @@ async def texml_initial(request: Request):
         xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{WELCOME_GREETING}</Say>
-    <Gather input="speech" action="{BASE_URL}/process-speech" method="POST" speechTimeout="5" speechModel="phone_call">
+    <Gather input="speech" action="{BASE_URL}/process-speech" method="POST" speechTimeout="10" partialResultCallback="{BASE_URL}/partial" speechModel="phone_call" language="en-US" profanityFilter="false">
     </Gather>
-    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't hear anything. Goodbye!</Say>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't hear anything. Let me try again with a longer timeout.</Say>
+    <Gather input="speech" action="{BASE_URL}/process-speech" method="POST" speechTimeout="15" speechModel="phone_call" language="en-US" profanityFilter="false">
+    </Gather>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I'm having trouble hearing you. Goodbye!</Say>
     <Hangup/>
 </Response>"""
         
         print(f"✅ Initial TeXML response generated")
         return Response(content=xml_response, media_type="text/xml")
+
+@app.post("/partial")
+async def partial_speech(request: Request):
+    """Handle partial speech results for debugging"""
+    try:
+        form = await request.form()
+        params = dict(form)
+        
+        call_sid = params.get("CallSid", "unknown")
+        partial_result = params.get("SpeechResult", "")
+        confidence = params.get("Confidence", "0.0")
+        
+        print(f"🎙️ Partial speech from {call_sid}: '{partial_result}' (confidence: {confidence})")
+        
+        # Return empty response - we're just logging
+        return Response(content="", media_type="text/plain")
+        
+    except Exception as e:
+        print(f"💥 Partial speech error: {e}")
+        return Response(content="", media_type="text/plain")
         
     except Exception as e:
         print(f"💥 Initial TeXML error: {e}")
@@ -216,10 +239,11 @@ async def process_speech(request: Request):
             print(f"❌ No speech result received")
             xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't hear anything. Could you please try again?</Say>
-    <Gather input="speech" action="{BASE_URL}/process-speech" method="POST" speechTimeout="5" speechModel="phone_call">
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't hear anything. Could you please try again and speak clearly after the beep?</Say>
+    <Gather input="speech" action="{BASE_URL}/process-speech" method="POST" speechTimeout="10" speechModel="phone_call" language="en-US" profanityFilter="false">
+        <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Please speak now.</Say>
     </Gather>
-    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Thanks for calling. Goodbye!</Say>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I'm still having trouble hearing you. Thanks for calling. Goodbye!</Say>
     <Hangup/>
 </Response>"""
             return Response(content=xml_response, media_type="text/xml")
@@ -228,10 +252,11 @@ async def process_speech(request: Request):
             print(f"❌ Speech too short: '{speech_result}'")
             xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't catch that clearly. Could you please repeat your question?</Say>
-    <Gather input="speech" action="{BASE_URL}/process-speech" method="POST" speechTimeout="5" speechModel="phone_call">
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't catch that clearly. Could you please repeat your question more clearly?</Say>
+    <Gather input="speech" action="{BASE_URL}/process-speech" method="POST" speechTimeout="10" speechModel="phone_call" language="en-US" profanityFilter="false">
+        <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Go ahead and speak now.</Say>
     </Gather>
-    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Thanks for calling. Goodbye!</Say>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I'm having difficulty understanding. Thanks for calling. Goodbye!</Say>
     <Hangup/>
 </Response>"""
             return Response(content=xml_response, media_type="text/xml")
@@ -267,7 +292,7 @@ async def process_speech(request: Request):
             xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{ai_response}</Say>
-    <Gather input="speech" action="{BASE_URL}/process-speech" method="POST" speechTimeout="5" speechModel="phone_call">
+    <Gather input="speech" action="{BASE_URL}/process-speech" method="POST" speechTimeout="10" speechModel="phone_call" language="en-US" profanityFilter="false">
     </Gather>
     <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Thanks for calling. Have a great day!</Say>
     <Hangup/>
