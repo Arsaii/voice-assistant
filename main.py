@@ -138,13 +138,27 @@ async def groq_response_streaming(chat_history, user_prompt):
     
     return full_response_text, api_elapsed
 
+# FIXED: Accept both GET and POST for /texml endpoint
+@app.get("/texml")
 @app.post("/texml")
-async def texml_endpoint():
+async def texml_endpoint(request: Request):
     """Return TeXML using Telnyx's built-in STT + ElevenLabs TTS"""
     try:
-        print(f"🔗 TeXML endpoint called")
+        print(f"🔗 TeXML endpoint called with {request.method}")
         print(f"🌐 Domain: {DOMAIN}")
         print(f"🤖 Model: {CHAT_MODEL}")
+        
+        # Log incoming parameters for debugging
+        if request.method == "GET":
+            params = dict(request.query_params)
+            print(f"📥 GET params: {params}")
+        else:
+            try:
+                form = await request.form()
+                params = dict(form)
+                print(f"📥 POST params: {params}")
+            except:
+                params = {}
         
         # Simple TeXML equivalent to Twilio ConversationRelay
         xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -183,6 +197,7 @@ async def texml_response_endpoint(request: Request):
         call_control_id = form.get("CallControlId", "")
         
         print(f"🎤 Telnyx STT: {transcript}")
+        print(f"📞 Call Control ID: {call_control_id}")
         
         if not transcript:
             # No speech detected, try again
@@ -279,8 +294,8 @@ async def root():
     return {
         "message": "Telnyx Voice Assistant API with Frankfurt routing",
         "endpoints": {
-            "texml": "/texml",
-            "texml_response": "/texml-response",
+            "texml": "/texml (GET/POST)",
+            "texml_response": "/texml-response (POST)",
             "health": "/health"
         },
         "features": [
