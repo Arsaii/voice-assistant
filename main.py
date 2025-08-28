@@ -139,7 +139,7 @@ async def groq_response_streaming(chat_history, user_prompt):
     return full_response_text, api_elapsed
 
 async def speak_response_to_call(call_sid, response_text):
-    """Send AI response back to the active call using Telnyx Voice API"""
+    """Send AI response back to the active call using Telnyx Voice API and continue listening"""
     try:
         print(f"🗣️ Speaking response to call {call_sid}")
         
@@ -165,12 +165,52 @@ async def speak_response_to_call(call_sid, response_text):
             if response.status == 200:
                 result = await response.json()
                 print(f"✅ Speak request successful: {result}")
+                
+                # After speaking, restart transcription to continue the conversation
+                await restart_transcription(call_sid)
+                
             else:
                 error_text = await response.text()
                 print(f"❌ Speak request failed ({response.status}): {error_text}")
                 
     except Exception as e:
         print(f"💥 Error speaking to call: {e}")
+        import traceback
+        print(f"🔍 Traceback: {traceback.format_exc()}")
+
+async def restart_transcription(call_sid):
+    """Stop and restart transcription to continue listening after AI response"""
+    try:
+        print(f"🔄 Restarting transcription for call {call_sid}")
+        
+        headers = {
+            "Authorization": f"Bearer {TELNYX_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        # Stop current transcription
+        stop_url = f"https://api.telnyx.com/v2/calls/{call_sid}/actions/transcription_stop"
+        async with http_session.post(stop_url, headers=headers) as response:
+            if response.status == 200:
+                print(f"✅ Transcription stopped")
+            
+        # Start new transcription
+        start_url = f"https://api.telnyx.com/v2/calls/{call_sid}/actions/transcription_start"
+        start_payload = {
+            "language": "en",
+            "transcription_engine": "B"
+        }
+        
+        async with http_session.post(start_url, headers=headers, json=start_payload) as response:
+            if response.status == 200:
+                result = await response.json()
+                print(f"✅ Transcription restarted: {result}")
+            else:
+                error_text = await response.text()
+                print(f"❌ Failed to restart transcription ({response.status}): {error_text}")
+                
+    except Exception as e:
+        print(f"💥 Error restarting transcription: {e}")
         import traceback
         print(f"🔍 Traceback: {traceback.format_exc()}")
 
