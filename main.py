@@ -197,20 +197,37 @@ async def transcription_endpoint(request: Request):
     try:
         print(f"🎯 /transcription endpoint called!")
         
-        # Get form data from Telnyx transcription webhook
-        form = await request.form()
-        form_data = dict(form)
-        print(f"📋 Transcription data: {form_data}")
+        # Try both form data and JSON parsing
+        form_data = {}
+        try:
+            form = await request.form()
+            form_data = dict(form)
+            print(f"📋 Form transcription data: {form_data}")
+        except:
+            try:
+                json_data = await request.json()
+                form_data = json_data
+                print(f"📋 JSON transcription data: {form_data}")
+            except:
+                # Fallback to query params
+                form_data = dict(request.query_params)
+                print(f"📋 Query transcription data: {form_data}")
         
-        transcript = form_data.get("Transcript", "")
+        transcript = form_data.get("Transcript", "").strip()
         is_final = form_data.get("IsFinal", "false").lower() == "true"
-        confidence = form_data.get("Confidence", "0")
+        confidence_str = form_data.get("Confidence", "0")
         call_sid = form_data.get("CallSid", "")
+        
+        # Handle empty confidence score
+        try:
+            confidence = float(confidence_str) if confidence_str else 1.0
+        except (ValueError, TypeError):
+            confidence = 1.0  # Default to high confidence if parsing fails
         
         print(f"🎤 Transcript: '{transcript}' (Final: {is_final}, Confidence: {confidence})")
         
-        # Only process final transcriptions with decent confidence
-        if is_final and transcript and float(confidence) > 0.5:
+        # Only process final transcriptions with content
+        if is_final and transcript:
             print(f"🤖 Processing final transcript: '{transcript}'")
             
             # Initialize session if needed
