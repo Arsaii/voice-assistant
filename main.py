@@ -1,132 +1,4 @@
-@app.post("/texml-response")
-async def texml_response_endpoint(request: Request):
-    """Handle Telnyx STT results and generate AI response with comprehensive timing"""
-    try:
-        print(f"🎯 /texml-response endpoint called!")
-        
-        # TIMING: Mark when we received the user's prompt (after STT)
-        prompt_received_time = time.time()
-        
-        # Enhanced form data parsing with debugging
-        form = await request.form()
-        print(f"📋 Raw form data: {dict(form)}")
-        
-        # Try multiple possible field names for speech recognition
-        transcript = (
-            form.get("SpeechResult", "") or 
-            form.get("UnstableSpeechResult", "") or
-            form.get("speech_result", "") or
-            form.get("Digits", "") or
-            form.get("RecognitionResult", "")
-        )
-        
-        call_control_id = (
-            form.get("CallControlId", "") or
-            form.get("CallSid", "") or
-            form.get("call_control_id", "")
-        )
-        
-        print(f"🎤 Extracted transcript: '{transcript}'")
-        print(f"📞 Call Control ID: '{call_control_id}'")
-        print(f"📝 All form keys: {list(form.keys())}")
-        
-        if not transcript:
-            print(f"⚠️ No speech detected - trying again")
-            # No speech detected, try again
-            xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Gather action="/texml-response" method="POST" timeout="15">
-        <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't catch that. Could you repeat?</Say>
-    </Gather>
-    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I'm having trouble hearing you. Goodbye!</Say>
-    <Hangup/>
-</Response>"""
-            return Response(content=xml_response, media_type="text/xml")
-        
-        # Initialize session if needed
-        if call_control_id not in sessions:
-            sessions[call_control_id] = {
-                "chat_history": [],
-                "timing": {
-                    "setup_time": time.time(),
-                    "last_response_complete": None,
-                    "last_prompt_received": None
-                }
-            }
-            print(f"🆕 New session created for call: {call_control_id}")
-        
-        # Calculate STT + VAD time
-        stt_vad_time = 0
-        if sessions[call_control_id]["timing"]["last_response_complete"]:
-            stt_vad_time = prompt_received_time - sessions[call_control_id]["timing"]["last_response_complete"]
-            print(f"🔊 Telnyx STT + VAD time: {stt_vad_time*1000:.0f}ms")
-        else:
-            stt_vad_time = prompt_received_time - sessions[call_control_id]["timing"]["setup_time"]
-            print(f"🔊 Initial Telnyx STT + VAD time: {stt_vad_time*1000:.0f}ms")
-        
-        sessions[call_control_id]["timing"]["last_prompt_received"] = prompt_received_time
-        
-        print(f"🤖 Generating AI response for: '{transcript}'")
-        
-        # Generate AI response
-        response_text, api_time = await groq_response_streaming(
-            sessions[call_control_id]["chat_history"], transcript
-        )
-        
-        # TIMING: Mark response completion
-        response_complete_time = time.time()
-        sessions[call_control_id]["timing"]["last_response_complete"] = response_complete_time
-        
-        # Calculate comprehensive timing breakdown
-        total_server_time = response_complete_time - prompt_received_time
-        network_overhead = total_server_time - api_time
-        
-        print(f"🤖 AI Response: '{response_text}'")
-        print(f"📊 TELNYX TIMING BREAKDOWN:")
-        print(f"  🔊 Telnyx STT + VAD: {stt_vad_time*1000:.0f}ms")
-        print(f"  🎯 Server Total: {total_server_time*1000:.0f}ms")
-        print(f"  🧠 AI Processing: {api_time*1000:.0f}ms")
-        print(f"  📡 Network/Overhead: {network_overhead*1000:.0f}ms")
-        print(f"  ⚡ Subtotal (visible): {(stt_vad_time + total_server_time)*1000:.0f}ms")
-        print(f"  ⚠️ + ElevenLabs TTS time (~400-800ms) = ~{((stt_vad_time + total_server_time)*1000 + 600):.0f}ms total")
-        print(f"  🇩🇪 Frankfurt routing active!")
-
-        # Performance analysis
-        total_visible_time = stt_vad_time + total_server_time
-        estimated_total = total_visible_time + 0.6  # Add estimated TTS time
-        
-        if estimated_total > 2.5:
-            print(f"🐌 SLOW OVERALL: {estimated_total:.1f}s")
-        elif estimated_total < 1.5:
-            print(f"🚀 FAST OVERALL: {estimated_total:.1f}s")
-        else:
-            print(f"✅ NORMAL OVERALL: {estimated_total:.1f}s")
-        
-        # Return TeXML with AI response
-        xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{response_text}</Say>
-    <Gather action="/texml-response" method="POST" timeout="15">
-        <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Anything else I can help with?</Say>
-    </Gather>
-    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Thanks for calling!</Say>
-    <Hangup/>
-</Response>"""
-        
-        print(f"✅ Returning AI response XML")
-        return Response(content=xml_response, media_type="text/xml")
-        
-    except Exception as e:
-        print(f"💥 TeXML response error: {e}")
-        import traceback
-        print(f"🔍 Traceback: {traceback.format_exc()}")
-        
-        xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Sorry, I had an error. Please try again.</Say>
-    <Hangup/>
-</Response>"""
-        return Response(content=xml_response, media_type="text/xml")import os
+import os
 import json
 import uvicorn
 import asyncio
@@ -288,13 +160,15 @@ async def texml_endpoint(request: Request):
             except:
                 params = {}
         
-        # Use ElevenLabs TTS with your configured integration secret
+        # Enhanced TeXML with better timeout configuration
         xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{WELCOME_GREETING}</Say>
-    <Gather action="/texml-response" method="POST" timeout="10" finishOnKey="">
+    <Gather action="/texml-response" method="POST" timeout="15" finishOnKey="">
         <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I'm listening...</Say>
     </Gather>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't hear anything. Goodbye!</Say>
+    <Hangup/>
 </Response>"""
         
         print(f"✅ TeXML response generated successfully")
@@ -317,24 +191,44 @@ async def texml_endpoint(request: Request):
 async def texml_response_endpoint(request: Request):
     """Handle Telnyx STT results and generate AI response with comprehensive timing"""
     try:
+        print(f"🎯 /texml-response endpoint called!")
+        
         # TIMING: Mark when we received the user's prompt (after STT)
         prompt_received_time = time.time()
         
-        # Get form data from Telnyx
+        # Enhanced form data parsing with debugging
         form = await request.form()
-        transcript = form.get("SpeechResult", "")
-        call_control_id = form.get("CallControlId", "")
+        print(f"📋 Raw form data: {dict(form)}")
         
-        print(f"🎤 Telnyx STT: {transcript}")
-        print(f"📞 Call Control ID: {call_control_id}")
+        # Try multiple possible field names for speech recognition
+        transcript = (
+            form.get("SpeechResult", "") or 
+            form.get("UnstableSpeechResult", "") or
+            form.get("speech_result", "") or
+            form.get("Digits", "") or
+            form.get("RecognitionResult", "")
+        )
+        
+        call_control_id = (
+            form.get("CallControlId", "") or
+            form.get("CallSid", "") or
+            form.get("call_control_id", "")
+        )
+        
+        print(f"🎤 Extracted transcript: '{transcript}'")
+        print(f"📞 Call Control ID: '{call_control_id}'")
+        print(f"📝 All form keys: {list(form.keys())}")
         
         if not transcript:
+            print(f"⚠️ No speech detected - trying again")
             # No speech detected, try again
             xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Gather action="/texml-response" method="POST" timeout="10">
+    <Gather action="/texml-response" method="POST" timeout="15">
         <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't catch that. Could you repeat?</Say>
     </Gather>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I'm having trouble hearing you. Goodbye!</Say>
+    <Hangup/>
 </Response>"""
             return Response(content=xml_response, media_type="text/xml")
         
@@ -348,6 +242,7 @@ async def texml_response_endpoint(request: Request):
                     "last_prompt_received": None
                 }
             }
+            print(f"🆕 New session created for call: {call_control_id}")
         
         # Calculate STT + VAD time
         stt_vad_time = 0
@@ -359,6 +254,8 @@ async def texml_response_endpoint(request: Request):
             print(f"🔊 Initial Telnyx STT + VAD time: {stt_vad_time*1000:.0f}ms")
         
         sessions[call_control_id]["timing"]["last_prompt_received"] = prompt_received_time
+        
+        print(f"🤖 Generating AI response for: '{transcript}'")
         
         # Generate AI response
         response_text, api_time = await groq_response_streaming(
@@ -373,7 +270,7 @@ async def texml_response_endpoint(request: Request):
         total_server_time = response_complete_time - prompt_received_time
         network_overhead = total_server_time - api_time
         
-        print(f"🤖 AI Response: {response_text}")
+        print(f"🤖 AI Response: '{response_text}'")
         print(f"📊 TELNYX TIMING BREAKDOWN:")
         print(f"  🔊 Telnyx STT + VAD: {stt_vad_time*1000:.0f}ms")
         print(f"  🎯 Server Total: {total_server_time*1000:.0f}ms")
@@ -394,15 +291,18 @@ async def texml_response_endpoint(request: Request):
         else:
             print(f"✅ NORMAL OVERALL: {estimated_total:.1f}s")
         
-        # Return TeXML with AI response using ElevenLabs TTS
+        # Return TeXML with AI response
         xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{response_text}</Say>
-    <Gather action="/texml-response" method="POST" timeout="10">
+    <Gather action="/texml-response" method="POST" timeout="15">
         <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Anything else I can help with?</Say>
     </Gather>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Thanks for calling!</Say>
+    <Hangup/>
 </Response>"""
         
+        print(f"✅ Returning AI response XML")
         return Response(content=xml_response, media_type="text/xml")
         
     except Exception as e:
