@@ -138,116 +138,25 @@ async def groq_response_streaming(chat_history, user_prompt):
     
     return full_response_text, api_elapsed
 
-async def start_voice_api_transcription(call_sid):
-    """Start Voice API transcription for the call"""
-    try:
-        print(f"🎤 Starting Voice API transcription for call {call_sid}")
-        
-        url = f"https://api.telnyx.com/v2/calls/{call_sid}/actions/transcription_start"
-        
-        headers = {
-            "Authorization": f"Bearer {TELNYX_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "language": "en",
-            "transcription_engine": "B",
-            "transcription_tracks": "inbound"
-        }
-        
-        async with http_session.post(url, headers=headers, json=payload) as response:
-            if response.status == 200:
-                result = await response.json()
-                print(f"✅ Voice API transcription started: {result}")
-                return True
-            else:
-                error_text = await response.text()
-                print(f"❌ Failed to start transcription ({response.status}): {error_text}")
-                return False
-                
-    except Exception as e:
-        print(f"💥 Error starting transcription: {e}")
-        return False
-
-async def speak_response_to_call(call_sid, response_text):
-    """Send AI response back to the active call using Telnyx Voice API"""
-    try:
-        print(f"🗣️ Speaking response to call {call_sid}")
-        
-        # Telnyx Voice API endpoint for speak action
-        url = f"https://api.telnyx.com/v2/calls/{call_sid}/actions/speak"
-        
-        headers = {
-            "Authorization": f"Bearer {TELNYX_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "payload": response_text,
-            "voice": f"ElevenLabs.Default.{ELEVENLABS_VOICE_ID}",
-            "voice_settings": {
-                "api_key_ref": "el_api_key"
-            }
-        }
-        
-        print(f"🔊 Sending speak request: {response_text[:50]}...")
-        
-        async with http_session.post(url, headers=headers, json=payload) as response:
-            if response.status == 200:
-                result = await response.json()
-                print(f"✅ Speak request successful: {result}")
-                print(f"🎧 Voice API transcription should continue listening...")
-            else:
-                error_text = await response.text()
-                print(f"❌ Speak request failed ({response.status}): {error_text}")
-                
-    except Exception as e:
-        print(f"💥 Error speaking to call: {e}")
-        import traceback
-        print(f"🔍 Traceback: {traceback.format_exc()}")
-
-# --- PURE VOICE API APPROACH ---
-
-@app.get("/texml")
 @app.post("/texml")
-async def texml_endpoint(request: Request):
-    """Simple TeXML that starts Voice API transcription"""
+async def texml_endpoint():
+    """Return TeXML using Telnyx's built-in STT + ElevenLabs TTS"""
     try:
-        print(f"🔗 TeXML endpoint called with {request.method}")
+        print(f"🔗 TeXML endpoint called")
         print(f"🌐 Domain: {DOMAIN}")
         print(f"🤖 Model: {CHAT_MODEL}")
         
-        # Log incoming parameters for debugging
-        if request.method == "GET":
-            params = dict(request.query_params)
-            print(f"📥 GET params: {params}")
-        else:
-            try:
-                form = await request.form()
-                params = dict(form)
-                print(f"📥 POST params: {params}")
-            except:
-                params = {}
-        
-        call_sid = params.get("CallSid", "")
-        
-        # Simple TeXML that plays greeting and holds the call
+        # Simple TeXML equivalent to Twilio ConversationRelay
         xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{WELCOME_GREETING}</Say>
-    <Pause length="60"/>
-    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Thanks for calling!</Say>
-    <Hangup/>
+    <Gather action="/texml-response" method="POST" timeout="10" finishOnKey="">
+        <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I'm listening...</Say>
+    </Gather>
 </Response>"""
         
-        # Start Voice API transcription asynchronously
-        if call_sid:
-            asyncio.create_task(start_voice_api_transcription(call_sid))
-        
         print(f"✅ TeXML response generated successfully")
-        print(f"🚀 Using Pure Voice API approach")
-        print(f"🎵 ElevenLabs Voice ID: {ELEVENLABS_VOICE_ID}")
+        print(f"🚀 Using Telnyx Frankfurt STT + ElevenLabs TTS")
         return Response(content=xml_response, media_type="text/xml")
         
     except Exception as e:
@@ -261,100 +170,125 @@ async def texml_endpoint(request: Request):
 </Response>"""
         return Response(content=fallback_xml, media_type="text/xml")
 
-@app.post("/webhooks/voice")
-async def voice_webhook(request: Request):
-    """Handle Voice API webhooks including transcription events"""
+@app.post("/texml-response")
+async def texml_response_endpoint(request: Request):
+    """Handle Telnyx STT results and generate AI response with comprehensive timing"""
     try:
-        print(f"🎯 Voice webhook called!")
+        # TIMING: Mark when we received the user's prompt (after STT)
+        prompt_received_time = time.time()
         
-        # Parse webhook data
-        webhook_data = await request.json()
-        print(f"📋 Webhook data: {webhook_data}")
+        # Get form data from Telnyx
+        form = await request.form()
+        transcript = form.get("SpeechResult", "")
+        call_control_id = form.get("CallControlId", "")
         
-        event_type = webhook_data.get("data", {}).get("event_type", "")
-        payload = webhook_data.get("data", {}).get("payload", {})
+        print(f"🎤 Telnyx STT: {transcript}")
         
-        print(f"🔔 Event type: {event_type}")
+        if not transcript:
+            # No speech detected, try again
+            xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Gather action="/texml-response" method="POST" timeout="10">
+        <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't catch that. Could you repeat?</Say>
+    </Gather>
+</Response>"""
+            return Response(content=xml_response, media_type="text/xml")
         
-        if event_type == "call.transcription":
-            # Handle transcription events
-            await handle_transcription_event(payload)
-        elif event_type == "call.answered":
-            # Handle call answered - start transcription
-            call_control_id = payload.get("call_control_id", "")
-            if call_control_id:
-                print(f"📞 Call answered, starting transcription for {call_control_id}")
-                await start_voice_api_transcription(call_control_id)
-        else:
-            print(f"ℹ️ Unhandled event type: {event_type}")
-        
-        return Response(content="OK", media_type="text/plain")
-        
-    except Exception as e:
-        print(f"💥 Voice webhook error: {e}")
-        import traceback
-        print(f"🔍 Traceback: {traceback.format_exc()}")
-        return Response(content="ERROR", media_type="text/plain")
-
-async def handle_transcription_event(payload):
-    """Handle transcription events from Voice API"""
-    try:
-        call_control_id = payload.get("call_control_id", "")
-        transcription_data = payload.get("transcription_data", {})
-        
-        transcript = transcription_data.get("transcript", "").strip()
-        is_final = transcription_data.get("is_final", False)
-        confidence = transcription_data.get("confidence", 1.0)
-        
-        print(f"🎤 Transcript: '{transcript}' (Final: {is_final}, Confidence: {confidence})")
-        
-        # Only process final transcriptions with content
-        if is_final and transcript and len(transcript) > 1:
-            print(f"🤖 Processing final transcript: '{transcript}'")
-            
-            # Initialize session if needed
-            if call_control_id not in sessions:
-                sessions[call_control_id] = {
-                    "chat_history": [],
-                    "timing": {
-                        "setup_time": time.time(),
-                        "last_response_complete": None,
-                        "last_prompt_received": None
-                    }
+        # Initialize session if needed
+        if call_control_id not in sessions:
+            sessions[call_control_id] = {
+                "chat_history": [],
+                "timing": {
+                    "setup_time": time.time(),
+                    "last_response_complete": None,
+                    "last_prompt_received": None
                 }
-                print(f"🆕 New session created for call: {call_control_id}")
-            
-            # Generate AI response
-            response_text, api_time = await groq_response_streaming(
-                sessions[call_control_id]["chat_history"], transcript
-            )
-            
-            print(f"🤖 AI Response: '{response_text}'")
-            
-            # Send the AI response back to the call
-            await speak_response_to_call(call_control_id, response_text)
+            }
+        
+        # Calculate STT + VAD time
+        stt_vad_time = 0
+        if sessions[call_control_id]["timing"]["last_response_complete"]:
+            stt_vad_time = prompt_received_time - sessions[call_control_id]["timing"]["last_response_complete"]
+            print(f"🔊 Telnyx STT + VAD time: {stt_vad_time*1000:.0f}ms")
+        else:
+            stt_vad_time = prompt_received_time - sessions[call_control_id]["timing"]["setup_time"]
+            print(f"🔊 Initial Telnyx STT + VAD time: {stt_vad_time*1000:.0f}ms")
+        
+        sessions[call_control_id]["timing"]["last_prompt_received"] = prompt_received_time
+        
+        # Generate AI response
+        response_text, api_time = await groq_response_streaming(
+            sessions[call_control_id]["chat_history"], transcript
+        )
+        
+        # TIMING: Mark response completion
+        response_complete_time = time.time()
+        sessions[call_control_id]["timing"]["last_response_complete"] = response_complete_time
+        
+        # Calculate comprehensive timing breakdown
+        total_server_time = response_complete_time - prompt_received_time
+        network_overhead = total_server_time - api_time
+        
+        print(f"🤖 AI Response: {response_text}")
+        print(f"📊 TELNYX TIMING BREAKDOWN:")
+        print(f"  🔊 Telnyx STT + VAD: {stt_vad_time*1000:.0f}ms")
+        print(f"  🎯 Server Total: {total_server_time*1000:.0f}ms")
+        print(f"  🧠 AI Processing: {api_time*1000:.0f}ms")
+        print(f"  📡 Network/Overhead: {network_overhead*1000:.0f}ms")
+        print(f"  ⚡ Subtotal (visible): {(stt_vad_time + total_server_time)*1000:.0f}ms")
+        print(f"  ⚠️ + ElevenLabs TTS time (~400-800ms) = ~{((stt_vad_time + total_server_time)*1000 + 600):.0f}ms total")
+        print(f"  🇩🇪 Frankfurt routing active!")
+
+        # Performance analysis
+        total_visible_time = stt_vad_time + total_server_time
+        estimated_total = total_visible_time + 0.6  # Add estimated TTS time
+        
+        if estimated_total > 2.5:
+            print(f"🐌 SLOW OVERALL: {estimated_total:.1f}s")
+        elif estimated_total < 1.5:
+            print(f"🚀 FAST OVERALL: {estimated_total:.1f}s")
+        else:
+            print(f"✅ NORMAL OVERALL: {estimated_total:.1f}s")
+        
+        # Return TeXML with AI response
+        xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{response_text}</Say>
+    <Gather action="/texml-response" method="POST" timeout="10">
+        <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Anything else I can help with?</Say>
+    </Gather>
+</Response>"""
+        
+        return Response(content=xml_response, media_type="text/xml")
         
     except Exception as e:
-        print(f"💥 Error handling transcription event: {e}")
+        print(f"💥 TeXML response error: {e}")
         import traceback
         print(f"🔍 Traceback: {traceback.format_exc()}")
+        
+        xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Sorry, I had an error. Please try again.</Say>
+    <Hangup/>
+</Response>"""
+        return Response(content=xml_response, media_type="text/xml")
 
 @app.get("/")
 async def root():
     """Simple root endpoint for testing"""
     return {
-        "message": "Telnyx Voice Assistant API - Pure Voice API Approach",
+        "message": "Telnyx Voice Assistant API with Frankfurt routing",
         "endpoints": {
-            "texml": "/texml (GET/POST)",
-            "voice_webhook": "/webhooks/voice (POST)",
+            "texml": "/texml",
+            "texml_response": "/texml-response",
             "health": "/health"
         },
         "features": [
-            "Pure Telnyx Voice API approach",
-            "Voice API transcription", 
-            "Groq LLM processing",
+            "Telnyx Frankfurt servers (low latency)",
+            "Telnyx built-in STT",
+            "Groq LLM processing", 
             "ElevenLabs TTS",
-            "Continuous conversation support"
+            "Comprehensive timing analysis"
         ]
     }
 
@@ -364,15 +298,20 @@ async def health_check():
         "status": "healthy", 
         "domain": DOMAIN,
         "model": CHAT_MODEL,
-        "approach": "Pure Voice API",
-        "stt_provider": "Telnyx Voice API Engine B",
+        "stt_provider": "Telnyx Frankfurt",
         "tts_provider": "ElevenLabs",
         "llm_provider": "Groq",
-        "voice_id": ELEVENLABS_VOICE_ID
+        "voice_id": ELEVENLABS_VOICE_ID,
+        "optimizations": [
+            "telnyx_frankfurt_routing", 
+            "groq_llm",
+            "elevenlabs_tts",
+            "comprehensive_timing"
+        ]
     }
 
 if __name__ == "__main__":
-    print(f"🚀 Starting Telnyx voice assistant - Pure Voice API approach")
+    print(f"🚀 Starting Telnyx voice assistant with Frankfurt routing")
     print(f"🌐 Domain: {DOMAIN}")
     print(f"🤖 Groq Model: {CHAT_MODEL}")
     print(f"🎵 ElevenLabs Voice: {ELEVENLABS_VOICE_ID}")
@@ -385,8 +324,8 @@ if __name__ == "__main__":
     print(f"  - GROQ_MODEL_NAME: {CHAT_MODEL}")
     print(f"  - ELEVENLABS_VOICE_ID: {ELEVENLABS_VOICE_ID}")
     
-    print(f"🔄 Pure Voice API Pipeline:")
-    print(f"  Call → Simple TeXML → Voice API Transcription → AI Response → Voice API Speak")
-    print(f"  Expected: Better conversation continuity")
+    print(f"🇩🇪 Clean Telnyx Pipeline:")
+    print(f"  Your voice → Telnyx Frankfurt STT → Groq LLM → ElevenLabs TTS → Your ears")
+    print(f"  Expected performance with Frankfurt routing: <2s total response time")
     
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, workers=1)
