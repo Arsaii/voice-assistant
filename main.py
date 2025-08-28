@@ -203,16 +203,32 @@ async def process_speech(request: Request):
         confidence = params.get("Confidence", "1.0")
         
         print(f"🎤 Speech result: '{speech_result}' (Confidence: {confidence})")
+        print(f"📞 Call SID: {call_sid}")
         
         # Get session
         session = get_session(call_sid)
         session["turn_count"] += 1
         
-        if not speech_result or len(speech_result) < 2:
-            print(f"❌ No speech detected or too short")
+        print(f"📊 Session turn count: {session['turn_count']}")
+        
+        # Check if we got any speech input
+        if not speech_result:
+            print(f"❌ No speech result received")
             xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't catch that. Could you please repeat your question?</Say>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't hear anything. Could you please try again?</Say>
+    <Gather input="speech" action="{BASE_URL}/process-speech" method="POST" speechTimeout="5" speechModel="phone_call">
+    </Gather>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Thanks for calling. Goodbye!</Say>
+    <Hangup/>
+</Response>"""
+            return Response(content=xml_response, media_type="text/xml")
+        
+        if len(speech_result) < 2:
+            print(f"❌ Speech too short: '{speech_result}'")
+            xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't catch that clearly. Could you please repeat your question?</Say>
     <Gather input="speech" action="{BASE_URL}/process-speech" method="POST" speechTimeout="5" speechModel="phone_call">
     </Gather>
     <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Thanks for calling. Goodbye!</Say>
@@ -222,23 +238,31 @@ async def process_speech(request: Request):
         
         # Generate AI response
         print(f"🤖 Generating AI response for: '{speech_result}'")
+        print(f"📚 Current chat history length: {len(session['chat_history'])}")
+        
         ai_response, api_time = await groq_response_streaming(
             session["chat_history"], speech_result
         )
         
-        print(f"🤖 AI Response: '{ai_response}'")
+        print(f"🤖 AI Response generated: '{ai_response}' (took {api_time*1000:.0f}ms)")
         
         # Determine if we should continue the conversation
         max_turns = int(os.getenv("MAX_CONVERSATION_TURNS", "10"))
         should_continue = session["turn_count"] < max_turns
         
+        print(f"🔄 Should continue? {should_continue} (turn {session['turn_count']}/{max_turns})")
+        
         # Check if response indicates end of conversation
         end_phrases = ["goodbye", "bye", "thanks for calling", "have a great day", "talk to you later"]
         ai_response_lower = ai_response.lower()
-        if any(phrase in ai_response_lower for phrase in end_phrases):
+        contains_end_phrase = any(phrase in ai_response_lower for phrase in end_phrases)
+        
+        if contains_end_phrase:
+            print(f"🛑 End phrase detected in AI response")
             should_continue = False
         
         if should_continue:
+            print(f"✅ Continuing conversation...")
             # Continue conversation with another gather
             xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -249,6 +273,7 @@ async def process_speech(request: Request):
     <Hangup/>
 </Response>"""
         else:
+            print(f"🛑 Ending conversation...")
             # End conversation
             xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -257,18 +282,22 @@ async def process_speech(request: Request):
     <Hangup/>
 </Response>"""
         
-        print(f"✅ Speech processing complete. Continue: {should_continue}")
+        print(f"📤 Returning TeXML response (length: {len(xml_response)} chars)")
+        print(f"🔍 XML Preview: {xml_response[:200]}...")
         return Response(content=xml_response, media_type="text/xml")
         
     except Exception as e:
         print(f"💥 Speech processing error: {e}")
         import traceback
-        print(f"🔍 Traceback: {traceback.format_exc()}")
+        print(f"🔍 Full traceback: {traceback.format_exc()}")
         
-        # Error fallback
+        # Error fallback with more specific messaging
         xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I'm sorry, I encountered an error processing your request. Please try calling again.</Say>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I'm sorry, I encountered a technical error. Let me try again.</Say>
+    <Gather input="speech" action="{BASE_URL}/process-speech" method="POST" speechTimeout="5" speechModel="phone_call">
+    </Gather>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I'm having technical difficulties. Please try calling again later.</Say>
     <Hangup/>
 </Response>"""
         return Response(content=xml_response, media_type="text/xml")
