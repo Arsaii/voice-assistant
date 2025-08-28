@@ -160,12 +160,18 @@ async def texml_endpoint(request: Request):
             except:
                 params = {}
         
-        # Fixed TeXML - separate greeting from gathering, no nested Say in Gather
+        # Fixed TeXML using Transcription instead of Gather for speech recognition
         xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{WELCOME_GREETING}</Say>
-    <Gather action="/texml-response" method="POST" timeout="15" finishOnKey="" speechTimeout="5"></Gather>
-    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't hear anything. Goodbye!</Say>
+    <Start>
+        <Transcription language="en" transcriptionCallback="/transcription" transcriptionEngine="B" />
+    </Start>
+    <Pause length="15"/>
+    <Stop>
+        <Transcription/>
+    </Stop>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Thanks for calling!</Say>
     <Hangup/>
 </Response>"""
         
@@ -184,6 +190,59 @@ async def texml_endpoint(request: Request):
   <Say>Sorry, there was an error setting up the call. Please try again.</Say>
 </Response>"""
         return Response(content=fallback_xml, media_type="text/xml")
+
+@app.post("/transcription")
+async def transcription_endpoint(request: Request):
+    """Handle Telnyx transcription results"""
+    try:
+        print(f"🎯 /transcription endpoint called!")
+        
+        # Get form data from Telnyx transcription webhook
+        form = await request.form()
+        form_data = dict(form)
+        print(f"📋 Transcription data: {form_data}")
+        
+        transcript = form_data.get("Transcript", "")
+        is_final = form_data.get("IsFinal", "false").lower() == "true"
+        confidence = form_data.get("Confidence", "0")
+        call_sid = form_data.get("CallSid", "")
+        
+        print(f"🎤 Transcript: '{transcript}' (Final: {is_final}, Confidence: {confidence})")
+        
+        # Only process final transcriptions with decent confidence
+        if is_final and transcript and float(confidence) > 0.5:
+            print(f"🤖 Processing final transcript: '{transcript}'")
+            
+            # Initialize session if needed
+            if call_sid not in sessions:
+                sessions[call_sid] = {
+                    "chat_history": [],
+                    "timing": {
+                        "setup_time": time.time(),
+                        "last_response_complete": None,
+                        "last_prompt_received": None
+                    }
+                }
+            
+            # Generate AI response
+            response_text, api_time = await groq_response_streaming(
+                sessions[call_sid]["chat_history"], transcript
+            )
+            
+            print(f"🤖 AI Response: '{response_text}'")
+            
+            # TODO: Send the AI response back to the call using Telnyx Voice API
+            # This requires making an API call to speak the response on the active call
+            print(f"⚠️ Need to implement Voice API call to speak response on call {call_sid}")
+        
+        # Return empty response (transcription webhooks don't expect TeXML)
+        return Response(content="OK", media_type="text/plain")
+        
+    except Exception as e:
+        print(f"💥 Transcription endpoint error: {e}")
+        import traceback
+        print(f"🔍 Traceback: {traceback.format_exc()}")
+        return Response(content="ERROR", media_type="text/plain")
 
 @app.post("/texml-response")
 @app.get("/texml-response")  # Add GET method for debugging
