@@ -159,6 +159,32 @@ async def start_voice_api_transcription(call_control_id):
         print(f"💥 Error starting transcription: {e}")
         return False
 
+async def stop_voice_api_transcription(call_control_id):
+    try:
+        print(f"🛑 Stopping transcription for call {call_control_id}")
+        url = f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/transcription_stop"
+        
+        headers = {
+            "Authorization": f"Bearer {TELNYX_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {}
+        
+        async with http_session.post(url, headers=headers, json=payload) as response:
+            if response.status == 200:
+                result = await response.json()
+                print(f"✅ Transcription stopped: {result}")
+                return True
+            else:
+                error_text = await response.text()
+                print(f"❌ Failed to stop transcription ({response.status}): {error_text}")
+                return False
+                
+    except Exception as e:
+        print(f"💥 Error stopping transcription: {e}")
+        return False
+
 async def speak_response_to_call(call_control_id, response_text):
     try:
         print(f"🗣️ Speaking to call {call_control_id}: {response_text[:50]}...")
@@ -206,9 +232,17 @@ async def voice_webhook(request: Request):
             print(f"Processing call.answered for {call_control_id}")
             await speak_response_to_call(call_control_id, WELCOME_GREETING)
             await start_voice_api_transcription(call_control_id)
+            # Update session state
+            if call_control_id in sessions:
+                sessions[call_control_id]["transcription_active"] = True
         elif event_type == "call.transcription":
             print(f"Processing call.transcription for {call_control_id}")
             await handle_transcription_event(payload)
+        elif event_type == "call.speak.ended":
+            print(f"Processing call.speak.ended for {call_control_id}")
+            if call_control_id in sessions and not sessions[call_control_id].get("transcription_active", False):
+                await start_voice_api_transcription(call_control_id)
+                sessions[call_control_id]["transcription_active"] = True
         
         print("========== WEBHOOK PROCESSING COMPLETE ==========")
         return Response(content="OK", media_type="text/plain")
@@ -232,9 +266,15 @@ async def handle_transcription_event(payload):
             print(f"🤖 Processing final transcript: '{transcript}'")
             if call_control_id not in sessions:
                 sessions[call_control_id] = {
-                    "chat_history": []
+                    "chat_history": [],
+                    "transcription_active": False  # Will be set to True after first start
                 }
                 print(f"🆕 New session for {call_control_id}")
+            
+            # Stop transcription before speaking AI response
+            if sessions[call_control_id]["transcription_active"]:
+                await stop_voice_api_transcription(call_control_id)
+                sessions[call_control_id]["transcription_active"] = False
             
             response_text, api_time = await groq_response_streaming(
                 sessions[call_control_id]["chat_history"], transcript
