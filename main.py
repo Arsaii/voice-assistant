@@ -165,8 +165,7 @@ async def texml_initial(request: Request):
         xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{WELCOME_GREETING}</Say>
-    <Gather input="speech" action="{BASE_URL}/process-speech" method="POST" speechTimeout="3" speechModel="phone_call">
-        <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Please say something.</Say>
+    <Gather input="speech" action="{BASE_URL}/process-speech" method="POST" speechTimeout="5" speechModel="phone_call">
     </Gather>
     <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't hear anything. Goodbye!</Say>
     <Hangup/>
@@ -214,8 +213,7 @@ async def process_speech(request: Request):
             xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't catch that. Could you please repeat your question?</Say>
-    <Gather input="speech" action="{BASE_URL}/process-speech" method="POST" speechTimeout="3" speechModel="phone_call">
-        <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Go ahead.</Say>
+    <Gather input="speech" action="{BASE_URL}/process-speech" method="POST" speechTimeout="5" speechModel="phone_call">
     </Gather>
     <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Thanks for calling. Goodbye!</Say>
     <Hangup/>
@@ -246,7 +244,6 @@ async def process_speech(request: Request):
 <Response>
     <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{ai_response}</Say>
     <Gather input="speech" action="{BASE_URL}/process-speech" method="POST" speechTimeout="5" speechModel="phone_call">
-        <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Is there anything else I can help you with?</Say>
     </Gather>
     <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Thanks for calling. Have a great day!</Say>
     <Hangup/>
