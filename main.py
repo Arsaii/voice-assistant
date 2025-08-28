@@ -186,36 +186,43 @@ async def texml_endpoint(request: Request):
         return Response(content=fallback_xml, media_type="text/xml")
 
 @app.post("/texml-response")
+@app.get("/texml-response")  # Add GET method for debugging
 async def texml_response_endpoint(request: Request):
     """Handle Telnyx STT results and generate AI response with comprehensive timing"""
     try:
-        print(f"🎯 /texml-response endpoint called!")
+        print(f"🎯 /texml-response endpoint called with {request.method}!")
         
         # TIMING: Mark when we received the user's prompt (after STT)
         prompt_received_time = time.time()
         
-        # Enhanced form data parsing with debugging
-        form = await request.form()
-        print(f"📋 Raw form data: {dict(form)}")
+        # Enhanced form data parsing with debugging for both GET and POST
+        if request.method == "GET":
+            form_data = dict(request.query_params)
+            print(f"📋 GET query params: {form_data}")
+        else:
+            form = await request.form()
+            form_data = dict(form)
+            print(f"📋 POST form data: {form_data}")
         
         # Try multiple possible field names for speech recognition
         transcript = (
-            form.get("SpeechResult", "") or 
-            form.get("UnstableSpeechResult", "") or
-            form.get("speech_result", "") or
-            form.get("Digits", "") or
-            form.get("RecognitionResult", "")
+            form_data.get("SpeechResult", "") or 
+            form_data.get("UnstableSpeechResult", "") or
+            form_data.get("speech_result", "") or
+            form_data.get("Digits", "") or
+            form_data.get("RecognitionResult", "") or
+            form_data.get("Body", "")  # Sometimes used for speech results
         )
         
         call_control_id = (
-            form.get("CallControlId", "") or
-            form.get("CallSid", "") or
-            form.get("call_control_id", "")
+            form_data.get("CallControlId", "") or
+            form_data.get("CallSid", "") or
+            form_data.get("call_control_id", "")
         )
         
         print(f"🎤 Extracted transcript: '{transcript}'")
         print(f"📞 Call Control ID: '{call_control_id}'")
-        print(f"📝 All form keys: {list(form.keys())}")
+        print(f"📝 All form keys: {list(form_data.keys())}")
         
         if not transcript:
             print(f"⚠️ No speech detected - trying again")
