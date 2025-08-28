@@ -138,6 +138,42 @@ async def groq_response_streaming(chat_history, user_prompt):
     
     return full_response_text, api_elapsed
 
+async def speak_response_to_call(call_sid, response_text):
+    """Send AI response back to the active call using Telnyx Voice API"""
+    try:
+        print(f"🗣️ Speaking response to call {call_sid}")
+        
+        # Telnyx Voice API endpoint for speak action
+        url = f"https://api.telnyx.com/v2/calls/{call_sid}/actions/speak"
+        
+        headers = {
+            "Authorization": f"Bearer {TELNYX_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "payload": response_text,
+            "voice": f"ElevenLabs.Default.{ELEVENLABS_VOICE_ID}",
+            "voice_settings": {
+                "api_key_ref": "el_api_key"
+            }
+        }
+        
+        print(f"🔊 Sending speak request: {response_text[:50]}...")
+        
+        async with http_session.post(url, headers=headers, json=payload) as response:
+            if response.status == 200:
+                result = await response.json()
+                print(f"✅ Speak request successful: {result}")
+            else:
+                error_text = await response.text()
+                print(f"❌ Speak request failed ({response.status}): {error_text}")
+                
+    except Exception as e:
+        print(f"💥 Error speaking to call: {e}")
+        import traceback
+        print(f"🔍 Traceback: {traceback.format_exc()}")
+
 # FIXED: Accept both GET and POST for /texml endpoint
 @app.get("/texml")
 @app.post("/texml")
@@ -248,9 +284,8 @@ async def transcription_endpoint(request: Request):
             
             print(f"🤖 AI Response: '{response_text}'")
             
-            # TODO: Send the AI response back to the call using Telnyx Voice API
-            # This requires making an API call to speak the response on the active call
-            print(f"⚠️ Need to implement Voice API call to speak response on call {call_sid}")
+            # Send the AI response back to the call using Telnyx Voice API
+            await speak_response_to_call(call_sid, response_text)
         
         # Return empty response (transcription webhooks don't expect TeXML)
         return Response(content="OK", media_type="text/plain")
