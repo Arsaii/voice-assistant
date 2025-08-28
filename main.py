@@ -160,21 +160,18 @@ async def texml_endpoint(request: Request):
             except:
                 params = {}
         
-        # Fixed TeXML structure - separate the greeting from the gather
+        # Back to ElevenLabs TTS with premium account
         xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="female">{WELCOME_GREETING}</Say>
-    <Pause length="1"/>
-    <Gather action="/texml-response" method="POST" timeout="15" finishOnKey="">
-        <Say voice="female">I'm listening...</Say>
-    </Gather>
-    <Say voice="female">I didn't hear anything. Goodbye!</Say>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{WELCOME_GREETING} I'm listening.</Say>
+    <Gather action="/texml-response" method="POST" timeout="15" finishOnKey=""></Gather>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't hear anything. Goodbye!</Say>
     <Hangup/>
 </Response>"""
         
         print(f"✅ TeXML response generated successfully")
-        print(f"🚀 Using Telnyx Frankfurt STT + Basic TTS (testing)")
-        print(f"🎵 Testing with basic voice instead of ElevenLabs")
+        print(f"🚀 Using Telnyx Frankfurt STT + ElevenLabs TTS (Premium)")
+        print(f"🎵 ElevenLabs Voice ID: {ELEVENLABS_VOICE_ID}")
         return Response(content=xml_response, media_type="text/xml")
         
     except Exception as e:
@@ -292,7 +289,7 @@ async def texml_response_endpoint(request: Request):
         else:
             print(f"✅ NORMAL OVERALL: {estimated_total:.1f}s")
         
-        # Return TeXML with AI response
+        # Return TeXML with AI response using ElevenLabs
         xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{response_text}</Say>
