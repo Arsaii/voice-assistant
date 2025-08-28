@@ -276,28 +276,7 @@ async def process_speech(request: Request):
 </Response>"""
         return Response(content=xml_response, media_type="text/xml")
 
-@app.post("/status")
-async def call_status(request: Request):
-    """Handle call status webhooks"""
-    try:
-        form = await request.form()
-        params = dict(form)
-        
-        call_sid = params.get("CallSid", "")
-        call_status = params.get("CallStatus", "")
-        
-        print(f"📞 Call status update: {call_sid} - {call_status}")
-        
-        # Clean up session when call ends
-        if call_status in ["completed", "busy", "no-answer", "failed", "canceled"] and call_sid in sessions:
-            print(f"🧹 Cleaning up session for ended call: {call_sid}")
-            del sessions[call_sid]
-        
-        return {"status": "ok"}
-        
-    except Exception as e:
-        print(f"💥 Status webhook error: {e}")
-        return {"status": "error"}
+
 
 @app.get("/")
 async def root():
@@ -307,16 +286,15 @@ async def root():
         "endpoints": {
             "texml": "/texml (GET/POST) - Initial call handler",
             "process_speech": "/process-speech (POST) - Speech processing",
-            "status": "/status (POST) - Call status updates",
-            "health": "/health"
+            "health": "/health",
+            "sessions": "/sessions (GET) - Debug endpoint"
         },
         "features": [
             "TeXML-only approach",
             "Gather with speech input", 
             "Groq LLM processing",
             "ElevenLabs TTS",
-            "Multi-turn conversation support",
-            "Automatic session cleanup"
+            "Multi-turn conversation support"
         ]
     }
 
