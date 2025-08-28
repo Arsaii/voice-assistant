@@ -160,20 +160,20 @@ async def texml_endpoint(request: Request):
             except:
                 params = {}
         
-        # Enhanced TeXML with better timeout configuration
+        # Test with basic TTS first to isolate the issue
         xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{WELCOME_GREETING}</Say>
+    <Say voice="female">{WELCOME_GREETING}</Say>
     <Gather action="/texml-response" method="POST" timeout="15" finishOnKey="">
-        <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I'm listening...</Say>
+        <Say voice="female">I'm listening...</Say>
     </Gather>
-    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I didn't hear anything. Goodbye!</Say>
+    <Say voice="female">I didn't hear anything. Goodbye!</Say>
     <Hangup/>
 </Response>"""
         
         print(f"✅ TeXML response generated successfully")
-        print(f"🚀 Using Telnyx Frankfurt STT + ElevenLabs TTS")
-        print(f"🎵 ElevenLabs Voice ID: {ELEVENLABS_VOICE_ID}")
+        print(f"🚀 Using Telnyx Frankfurt STT + Basic TTS (testing)")
+        print(f"🎵 Testing with basic voice instead of ElevenLabs")
         return Response(content=xml_response, media_type="text/xml")
         
     except Exception as e:
