@@ -160,10 +160,11 @@ async def texml_endpoint(request: Request):
             except:
                 params = {}
         
-        # Test with basic TTS first to isolate the issue
+        # Fixed TeXML structure - separate the greeting from the gather
         xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="female">{WELCOME_GREETING}</Say>
+    <Pause length="1"/>
     <Gather action="/texml-response" method="POST" timeout="15" finishOnKey="">
         <Say voice="female">I'm listening...</Say>
     </Gather>
