@@ -397,6 +397,6 @@ if __name__ == "__main__":
     
     print(f"🔄 TeXML-Only Pipeline:")
     print(f"  Call → TeXML Greeting → Gather Speech → AI Response → Continue/End")
-    print(f"  Benefits: Simpler architecture, reliable turn-based conversation")
+    print(f"  sBenefits: Simpler architecture, reliable turn-based conversation")
     
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, workers=1)
