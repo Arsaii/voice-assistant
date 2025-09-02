@@ -214,27 +214,21 @@ async def texml_endpoint(request: Request):
             print(f"Speaking pending AI response: '{ai_response}'")
             
             # Return TeXML to speak the AI response and continue listening
-            xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{ai_response}</Say>
-    <Start>
-        <Transcription language="en" transcriptionCallback="/transcription" transcriptionEngine="B" />
-    </Start>
-    <Pause length="5"/>
-    <Redirect>/texml</Redirect>
-</Response>"""
-        else:
-            # Initial greeting or continue listening
-            print("No pending response, showing greeting or continuing")
-            
-            xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+        # Generate TeXML response with continuous conversation loop
+        xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{WELCOME_GREETING}</Say>
     <Start>
         <Transcription language="en" transcriptionCallback="/transcription" transcriptionEngine="B" />
     </Start>
-    <Pause length="5"/>
-    <Redirect>/texml</Redirect>
+    <Gather action="/texml-response" method="POST" timeout="10" finishOnKey="">
+        <Pause length="1"/>
+    </Gather>
+    <Stop>
+        <Transcription/>
+    </Stop>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Thanks for calling!</Say>
+    <Hangup/>
 </Response>"""
         
         print("TeXML response generated successfully")
@@ -246,6 +240,61 @@ async def texml_endpoint(request: Request):
         fallback_xml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say>Sorry, there was an error setting up the call. Please try again.</Say>
+</Response>"""
+        return Response(content=fallback_xml, media_type="text/xml")
+
+@app.post("/texml-response")
+async def texml_response_endpoint(request: Request):
+    """Handle responses and return AI-generated TeXML"""
+    try:
+        print("TeXML response endpoint called")
+        
+        # Parse form data
+        form = await request.form()
+        form_data = dict(form)
+        print(f"TeXML response data: {form_data}")
+        
+        call_sid = form_data.get("CallSid", "")
+        
+        # Check if we have a pending AI response
+        if call_sid in sessions and "pending_response" in sessions[call_sid]:
+            ai_response = sessions[call_sid]["pending_response"]
+            del sessions[call_sid]["pending_response"]
+            
+            print(f"Returning AI response as TeXML: '{ai_response}'")
+            
+            # Return TeXML with AI response and continue conversation
+            xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{ai_response}</Say>
+    <Gather action="/texml-response" method="POST" timeout="10" finishOnKey="">
+        <Pause length="1"/>
+    </Gather>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Thanks for calling!</Say>
+    <Hangup/>
+</Response>"""
+        else:
+            print("No pending response, continuing to listen")
+            
+            # Continue listening
+            xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Gather action="/texml-response" method="POST" timeout="10" finishOnKey="">
+        <Pause length="1"/>
+    </Gather>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Thanks for calling!</Say>
+    <Hangup/>
+</Response>"""
+        
+        return Response(content=xml_response, media_type="text/xml")
+        
+    except Exception as e:
+        print(f"TeXML response endpoint error: {e}")
+        
+        fallback_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">I had an error. Please try again.</Say>
+    <Hangup/>
 </Response>"""
         return Response(content=fallback_xml, media_type="text/xml")
 
@@ -295,20 +344,10 @@ async def transcription_endpoint(request: Request):
             
             print(f"AI response: '{ai_response}'")
             
-            # Store the AI response and trigger TeXML to check for it
+            # Store the AI response for the TeXML response endpoint
             session["pending_response"] = ai_response
             
-            print("AI response stored, triggering TeXML redirect")
-            
-            # Use Telnyx Voice API to redirect the call back to TeXML
-            redirect_success = await redirect_call_to_texml(call_sid)
-            
-            if redirect_success:
-                print("Successfully triggered TeXML redirect")
-            else:
-                print("Failed to redirect call - trying direct speak")
-                # Fallback: try speaking directly via Voice API
-                await speak_to_call(call_sid, ai_response)
+            print("AI response stored, TeXML will pick it up on next gather timeout")
         
         return Response(content="OK", media_type="text/plain")
         
