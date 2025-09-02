@@ -174,14 +174,14 @@ async def texml_endpoint(request: Request):
         
         print(f"TeXML params: {params}")
         
-        # Generate TeXML response with transcription
+        # Generate TeXML response with shorter pause and transcription-only mode
         xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{WELCOME_GREETING}</Say>
     <Start>
         <Transcription language="en" transcriptionCallback="/transcription" transcriptionEngine="B" />
     </Start>
-    <Pause length="30"/>
+    <Pause length="5"/>
     <Stop>
         <Transcription/>
     </Stop>
@@ -247,13 +247,10 @@ async def transcription_endpoint(request: Request):
             
             print(f"AI response: '{ai_response}'")
             
-            # Speak the response back to the caller
-            speak_success = await speak_to_call(call_sid, ai_response)
+            # Store the AI response in the session for the next TeXML call
+            session["pending_response"] = ai_response
             
-            if speak_success:
-                print("Response successfully sent to caller")
-            else:
-                print("Failed to send response to caller")
+            print("AI response stored, waiting for next TeXML request")
         
         return Response(content="OK", media_type="text/plain")
         
@@ -328,8 +325,5 @@ if __name__ == "__main__":
     print(f"  - GROQ_API_KEY: {'Set' if GROQ_API_KEY else 'NOT SET'}")
     print(f"  - EL_API_KEY: {'Set' if ELEVENLABS_API_KEY else 'NOT SET'}")
     print(f"  - TELNYX_API_KEY: {'Set' if TELNYX_API_KEY else 'NOT SET'}")
-    
-    print(f"Architecture: TeXML Application + Transcription")
-    print(f"Flow: Call → TeXML greeting → Transcription → AI → Voice API speak")
     
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, workers=1)
