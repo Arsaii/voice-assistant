@@ -121,6 +121,36 @@ async def generate_ai_response(chat_history, user_prompt):
         print(f"Error generating AI response: {e}")
         return "I encountered an error. Please try again.", 0
 
+async def redirect_call_to_texml(call_sid):
+    """Redirect the call back to TeXML to check for pending responses"""
+    try:
+        print(f"Redirecting call {call_sid} to TeXML")
+        
+        url = f"https://api.telnyx.com/v2/calls/{call_sid}/actions/redirect"
+        
+        headers = {
+            "Authorization": f"Bearer {TELNYX_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "redirect_url": f"https://{DOMAIN}/texml"
+        }
+        
+        async with http_session.post(url, headers=headers, json=payload) as response:
+            if response.status == 200:
+                result = await response.json()
+                print(f"Redirect request successful: {result}")
+                return True
+            else:
+                error_text = await response.text()
+                print(f"Redirect request failed ({response.status}): {error_text}")
+                return False
+                
+    except Exception as e:
+        print(f"Error redirecting call: {e}")
+        return False
+
 async def speak_to_call(call_sid, text):
     """Send text to be spoken on the call using Telnyx Voice API"""
     try:
@@ -174,19 +204,37 @@ async def texml_endpoint(request: Request):
         
         print(f"TeXML params: {params}")
         
-        # Generate TeXML response with shorter pause and transcription-only mode
-        xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+        call_sid = params.get("CallSid", "")
+        
+        # Check if we have a pending AI response for this call
+        if call_sid in sessions and "pending_response" in sessions[call_sid]:
+            ai_response = sessions[call_sid]["pending_response"]
+            del sessions[call_sid]["pending_response"]  # Remove after using
+            
+            print(f"Speaking pending AI response: '{ai_response}'")
+            
+            # Return TeXML to speak the AI response and continue listening
+            xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{ai_response}</Say>
+    <Start>
+        <Transcription language="en" transcriptionCallback="/transcription" transcriptionEngine="B" />
+    </Start>
+    <Pause length="5"/>
+    <Redirect>/texml</Redirect>
+</Response>"""
+        else:
+            # Initial greeting or continue listening
+            print("No pending response, showing greeting or continuing")
+            
+            xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">{WELCOME_GREETING}</Say>
     <Start>
         <Transcription language="en" transcriptionCallback="/transcription" transcriptionEngine="B" />
     </Start>
     <Pause length="5"/>
-    <Stop>
-        <Transcription/>
-    </Stop>
-    <Say voice="ElevenLabs.Default.{ELEVENLABS_VOICE_ID}" api_key_ref="el_api_key">Thanks for calling!</Say>
-    <Hangup/>
+    <Redirect>/texml</Redirect>
 </Response>"""
         
         print("TeXML response generated successfully")
@@ -247,10 +295,20 @@ async def transcription_endpoint(request: Request):
             
             print(f"AI response: '{ai_response}'")
             
-            # Store the AI response in the session for the next TeXML call
+            # Store the AI response and trigger TeXML to check for it
             session["pending_response"] = ai_response
             
-            print("AI response stored, waiting for next TeXML request")
+            print("AI response stored, triggering TeXML redirect")
+            
+            # Use Telnyx Voice API to redirect the call back to TeXML
+            redirect_success = await redirect_call_to_texml(call_sid)
+            
+            if redirect_success:
+                print("Successfully triggered TeXML redirect")
+            else:
+                print("Failed to redirect call - trying direct speak")
+                # Fallback: try speaking directly via Voice API
+                await speak_to_call(call_sid, ai_response)
         
         return Response(content="OK", media_type="text/plain")
         
